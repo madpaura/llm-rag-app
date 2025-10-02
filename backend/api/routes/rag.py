@@ -4,6 +4,8 @@ RAG API routes for the advanced RAG engine.
 from fastapi import APIRouter, HTTPException, Depends
 from typing import Dict, Any
 import structlog
+import json
+from pathlib import Path
 
 from api.schemas.rag_schemas import (
     IngestRequest,
@@ -259,72 +261,44 @@ async def list_models():
 @router.get("/prompt-templates", response_model=ListPromptTemplatesResponse)
 async def list_prompt_templates():
     """
-    List available prompt templates.
+    List available prompt templates from config files.
     """
-    templates = [
-        PromptTemplateSchema(
-            name="default",
-            template="""You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question. If you don't know the answer, just say that you don't know. Use three sentences maximum and keep the answer concise.
-
-Question: {question}
-
-Context: {context}
-
-Answer:""",
-            description="Default concise Q&A template",
-            variables=["context", "question"]
-        ),
-        PromptTemplateSchema(
-            name="detailed",
-            template="""You are an expert assistant. Use the following context to provide a detailed and comprehensive answer to the question. Include relevant examples and explanations.
-
-Context: {context}
-
-Question: {question}
-
-Detailed Answer:""",
-            description="Detailed answer template with examples",
-            variables=["context", "question"]
-        ),
-        PromptTemplateSchema(
-            name="technical",
-            template="""You are a technical expert. Based on the following documentation, provide a precise technical answer to the question. Include code examples if relevant.
-
-Documentation: {context}
-
-Question: {question}
-
-Technical Answer:""",
-            description="Technical documentation template",
-            variables=["context", "question"]
-        ),
-        PromptTemplateSchema(
-            name="conversational",
-            template="""You are a friendly assistant having a conversation. Use the context below to answer the question in a natural, conversational way.
-
-Context: {context}
-
-Question: {question}
-
-Response:""",
-            description="Conversational style template",
-            variables=["context", "question"]
-        ),
-        PromptTemplateSchema(
-            name="step_by_step",
-            template="""You are a helpful tutor. Use the following context to answer the question with step-by-step explanations.
-
-Context: {context}
-
-Question: {question}
-
-Step-by-step Answer:""",
-            description="Step-by-step explanation template",
-            variables=["context", "question"]
+    try:
+        # Get the path to the templates config file
+        config_path = Path(__file__).parent.parent.parent / "config" / "templates" / "default.json"
+        
+        if not config_path.exists():
+            raise HTTPException(
+                status_code=500,
+                detail=f"Template configuration file not found at {config_path}"
+            )
+        
+        # Load templates from JSON file
+        with open(config_path, 'r') as f:
+            config_data = json.load(f)
+        
+        # Convert to PromptTemplateSchema objects
+        templates = [
+            PromptTemplateSchema(**template_data)
+            for template_data in config_data.get("templates", [])
+        ]
+        
+        logger.info("Prompt templates loaded", count=len(templates), source=str(config_path))
+        
+        return ListPromptTemplatesResponse(templates=templates)
+        
+    except json.JSONDecodeError as e:
+        logger.error("Failed to parse template config", error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Invalid JSON in template configuration: {str(e)}"
         )
-    ]
-    
-    return ListPromptTemplatesResponse(templates=templates)
+    except Exception as e:
+        logger.error("Failed to load prompt templates", error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load templates: {str(e)}"
+        )
 
 
 @router.get("/techniques", response_model=ListTechniquesResponse)

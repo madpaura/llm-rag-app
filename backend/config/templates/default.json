@@ -1,0 +1,34 @@
+{
+  "templates": [
+    {
+      "name": "default",
+      "template": "You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question. If you don't know the answer, just say that you don't know. Use three sentences maximum and keep the answer concise.\n\nQuestion: {question}\n\nContext: {context}\n\nAnswer:",
+      "description": "Default concise Q&A template",
+      "variables": ["context", "question"]
+    },
+    {
+      "name": "detailed",
+      "template": "You are an expert assistant. Use the following context to provide a detailed and comprehensive answer to the question. Include relevant examples and explanations.\n\nContext: {context}\n\nQuestion: {question}\n\nDetailed Answer:",
+      "description": "Detailed answer template with examples",
+      "variables": ["context", "question"]
+    },
+    {
+      "name": "technical",
+      "template": "You are a technical expert. Based on the following documentation, provide a precise technical answer to the question. Include code examples if relevant.\n\nDocumentation: {context}\n\nQuestion: {question}\n\nTechnical Answer:",
+      "description": "Technical documentation template",
+      "variables": ["context", "question"]
+    },
+    {
+      "name": "conversational",
+      "template": "You are a friendly assistant having a conversation. Use the context below to answer the question in a natural, conversational way.\n\nContext: {context}\n\nQuestion: {question}\n\nResponse:",
+      "description": "Conversational style template",
+      "variables": ["context", "question"]
+    },
+    {
+      "name": "step_by_step",
+      "template": "You are a helpful tutor. Use the following context to answer the question with step-by-step explanations.\n\nContext: {context}\n\nQuestion: {question}\n\nStep-by-step Answer:",
+      "description": "Step-by-step explanation template",
+      "variables": ["context", "question"]
+    }
+  ]
+}

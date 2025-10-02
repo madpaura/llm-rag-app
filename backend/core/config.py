@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     
     # App Configuration
     APP_NAME: str = "Organization RAG API"
-    DEBUG: bool = False
+    DEBUG: bool = True
     VERSION: str = "1.0.0"
     
     # Database
