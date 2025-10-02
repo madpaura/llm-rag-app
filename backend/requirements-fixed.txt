@@ -1,0 +1,58 @@
+# Core Framework
+fastapi
+uvicorn[standard]
+pydantic>=2.7.0
+python-multipart
+
+# Database
+sqlalchemy
+alembic
+psycopg2-binary
+asyncpg
+
+# LangChain and RAG
+langchain
+langchain-community
+langchain-core
+langchain-ollama
+langchain-openai
+langchain-text-splitters
+
+# Vector Stores and Embeddings
+sentence-transformers
+faiss-cpu
+chromadb
+pinecone-client
+weaviate-client
+
+# LLM Integration
+openai
+tiktoken
+ollama
+
+# Data Processing
+GitPython
+python-docx
+PyPDF2
+beautifulsoup4
+requests
+aiofiles
+
+# Authentication & Security
+python-jose[cryptography]
+passlib[bcrypt]
+
+# Monitoring & Logging
+structlog
+sentry-sdk
+prometheus-client
+
+# Testing
+pytest
+pytest-asyncio
+httpx
+
+# Development
+black
+isort
+mypy
