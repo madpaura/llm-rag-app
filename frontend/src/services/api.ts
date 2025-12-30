@@ -82,6 +82,8 @@ export interface ChatMessage {
   created_at: string;
 }
 
+export type RAGTechnique = 'standard' | 'rag_fusion' | 'hyde' | 'multi_query';
+
 export interface QueryResponse {
   success: boolean;
   answer: string;
@@ -97,6 +99,7 @@ export interface QueryResponse {
   }>;
   context_used: boolean;
   retrieved_docs_count: number;
+  technique?: string;
 }
 
 export interface IngestionResponse {
@@ -153,6 +156,11 @@ export const api = {
 
   async getWorkspaceMembers(workspaceId: number): Promise<any[]> {
     const response = await apiClient.get(`/api/workspaces/${workspaceId}/members`);
+    return response.data;
+  },
+
+  async deleteWorkspace(workspaceId: number): Promise<{ success: boolean; message: string }> {
+    const response = await apiClient.delete(`/api/workspaces/${workspaceId}`);
     return response.data;
   },
 
@@ -217,12 +225,14 @@ export const api = {
   async searchKnowledgeBase(
     question: string,
     workspaceId: number,
-    k: number = 5
+    k: number = 5,
+    ragTechnique?: RAGTechnique
   ): Promise<QueryResponse> {
     const response = await apiClient.post('/api/query/search', {
       question,
       workspace_id: workspaceId,
       k,
+      rag_technique: ragTechnique,
     });
     return response.data;
   },
@@ -240,16 +250,22 @@ export const api = {
     return response.data;
   },
 
-  async sendChatMessage(sessionId: number, message: string): Promise<{
+  async sendChatMessage(
+    sessionId: number, 
+    message: string,
+    ragTechnique?: RAGTechnique
+  ): Promise<{
     success: boolean;
     message_id: number;
     answer: string;
     sources: any[];
     context_used: boolean;
+    technique?: string;
   }> {
     const response = await apiClient.post('/api/query/chat/message', {
       session_id: sessionId,
       message,
+      rag_technique: ragTechnique,
     });
     return response.data;
   },

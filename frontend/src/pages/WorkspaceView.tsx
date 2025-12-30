@@ -1,17 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
-import { MessageSquare, Upload, Database, Plus, Send, Loader2 } from 'lucide-react';
+import { useParams, Link, useNavigate } from 'react-router-dom';
+import { MessageSquare, Upload, Database, Plus, Send, Loader2, Trash2 } from 'lucide-react';
 import { api, Workspace, ChatSession, DataSource } from '../services/api';
 import { ChatInterface } from '../components/ChatInterface';
 
 export function WorkspaceView() {
   const { workspaceId } = useParams<{ workspaceId: string }>();
+  const navigate = useNavigate();
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [dataSources, setDataSources] = useState<DataSource[]>([]);
   const [activeChatSession, setActiveChatSession] = useState<ChatSession | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     if (workspaceId) {
@@ -60,6 +62,26 @@ export function WorkspaceView() {
     }
   };
 
+  const handleDeleteWorkspace = async () => {
+    if (!workspaceId || !workspace) return;
+
+    const confirmed = window.confirm(
+      `Are you sure you want to delete "${workspace.name}"?\n\nThis will permanently delete:\n- All chat sessions and messages\n- All data sources and documents\n- All workspace members\n\nThis action cannot be undone.`
+    );
+
+    if (!confirmed) return;
+
+    try {
+      setIsDeleting(true);
+      await api.deleteWorkspace(parseInt(workspaceId));
+      navigate('/');
+    } catch (err) {
+      alert('Failed to delete workspace');
+      console.error('Error deleting workspace:', err);
+      setIsDeleting(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -90,7 +112,21 @@ export function WorkspaceView() {
       <div className="w-80 bg-white border-r border-gray-200 flex flex-col">
         {/* Workspace Header */}
         <div className="p-4 border-b border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-900">{workspace?.name}</h2>
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-gray-900">{workspace?.name}</h2>
+            <button
+              onClick={handleDeleteWorkspace}
+              disabled={isDeleting}
+              className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors disabled:opacity-50"
+              title="Delete workspace"
+            >
+              {isDeleting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Trash2 className="h-4 w-4" />
+              )}
+            </button>
+          </div>
           {workspace?.description && (
             <p className="text-sm text-gray-500 mt-1">{workspace.description}</p>
           )}

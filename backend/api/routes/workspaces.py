@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 import structlog
 
-from core.database import get_db, Workspace, WorkspaceMember, User
+from core.database import get_db, Workspace, WorkspaceMember, User, DataSource, Document, DocumentChunk, ChatSession, ChatMessage
 
 logger = structlog.get_logger()
 router = APIRouter()
@@ -170,3 +170,79 @@ async def get_workspace_members(
         ))
     
     return result
+
+
+@router.delete("/{workspace_id}")
+async def delete_workspace(
+    workspace_id: int,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Delete a workspace and all associated data.
+    This includes: data sources, documents, document chunks, chat sessions, chat messages, and members.
+    """
+    # TODO: Get user from token
+    user_id = 1  # Mock user ID
+    
+    # Check if workspace exists
+    workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+    if not workspace:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workspace not found"
+        )
+    
+    # Check if user is admin of the workspace
+    member = db.query(WorkspaceMember)\
+        .filter(WorkspaceMember.workspace_id == workspace_id)\
+        .filter(WorkspaceMember.user_id == user_id)\
+        .first()
+    
+    if not member or member.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only workspace admins can delete workspaces"
+        )
+    
+    try:
+        # Delete chat messages for all sessions in this workspace
+        chat_sessions = db.query(ChatSession).filter(ChatSession.workspace_id == workspace_id).all()
+        for session in chat_sessions:
+            db.query(ChatMessage).filter(ChatMessage.session_id == session.id).delete()
+        
+        # Delete chat sessions
+        db.query(ChatSession).filter(ChatSession.workspace_id == workspace_id).delete()
+        
+        # Delete document chunks and documents for all data sources
+        data_sources = db.query(DataSource).filter(DataSource.workspace_id == workspace_id).all()
+        for ds in data_sources:
+            documents = db.query(Document).filter(Document.data_source_id == ds.id).all()
+            for doc in documents:
+                db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).delete()
+            db.query(Document).filter(Document.data_source_id == ds.id).delete()
+        
+        # Delete data sources
+        db.query(DataSource).filter(DataSource.workspace_id == workspace_id).delete()
+        
+        # Delete workspace members
+        db.query(WorkspaceMember).filter(WorkspaceMember.workspace_id == workspace_id).delete()
+        
+        # Delete workspace
+        db.delete(workspace)
+        db.commit()
+        
+        logger.info(f"Workspace {workspace_id} and all associated data deleted")
+        
+        return {
+            "success": True,
+            "message": f"Workspace '{workspace.name}' and all associated data deleted successfully"
+        }
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deleting workspace: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete workspace: {str(e)}"
+        )

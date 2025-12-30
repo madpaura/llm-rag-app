@@ -20,6 +20,14 @@ langchain-text-splitters>=0.3.0
 
 # LLM Integration
 ollama>=0.4.0
+httpx>=0.25.0
+
+# Vector Store
+faiss-cpu>=1.7.4
+chromadb>=0.4.0
+
+# Embeddings (fallback)
+sentence-transformers>=2.2.0
 
 # Data Processing
 GitPython>=3.1.0

@@ -3,10 +3,10 @@ Vector database service for embeddings and similarity search.
 """
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
-from sentence_transformers import SentenceTransformer
 import faiss
 import pickle
 import os
+import asyncio
 import structlog
 from abc import ABC, abstractmethod
 
@@ -55,10 +55,20 @@ class FAISSVectorStore(VectorStore):
                     self.metadata = data.get('metadata', {})
                     self.id_to_index = data.get('id_to_index', {})
                     self.index_to_id = data.get('index_to_id', {})
-                logger.info(f"Loaded FAISS index with {self.index.ntotal} vectors")
+                
+                # Check if dimension matches, recreate if not
+                if self.index.d != self.dimension:
+                    logger.warning(f"FAISS index dimension mismatch: index has {self.index.d}, expected {self.dimension}. Recreating index.")
+                    self.index = faiss.IndexFlatIP(self.dimension)
+                    self.metadata = {}
+                    self.id_to_index = {}
+                    self.index_to_id = {}
+                    logger.info(f"Created new FAISS index with dimension {self.dimension}")
+                else:
+                    logger.info(f"Loaded FAISS index with {self.index.ntotal} vectors (dim={self.index.d})")
             else:
-                self.index = faiss.IndexFlatIP(self.dimension)  # Inner product for cosine similarity
-                logger.info("Created new FAISS index")
+                self.index = faiss.IndexFlatIP(self.dimension)
+                logger.info(f"Created new FAISS index with dimension {self.dimension}")
         except Exception as e:
             logger.error(f"Error loading FAISS index: {e}")
             self.index = faiss.IndexFlatIP(self.dimension)
@@ -83,6 +93,22 @@ class FAISSVectorStore(VectorStore):
         try:
             if len(vectors) != len(metadata) or len(vectors) != len(ids):
                 raise ValueError("Vectors, metadata, and IDs must have same length")
+            
+            if len(vectors) == 0:
+                logger.warning("No vectors to add")
+                return True
+            
+            # Check vector dimension matches index
+            vector_dim = vectors[0].shape[0]
+            if vector_dim != self.dimension:
+                logger.error(f"Vector dimension mismatch: vectors have dim {vector_dim}, index expects {self.dimension}")
+                # Recreate index with correct dimension
+                self.dimension = vector_dim
+                self.index = faiss.IndexFlatIP(self.dimension)
+                self.metadata = {}
+                self.id_to_index = {}
+                self.index_to_id = {}
+                logger.info(f"Recreated FAISS index with dimension {self.dimension}")
             
             # Normalize vectors for cosine similarity
             vectors_array = np.array(vectors).astype('float32')
@@ -149,26 +175,69 @@ class FAISSVectorStore(VectorStore):
             return False
 
 class EmbeddingService:
-    """Service for generating embeddings."""
+    """
+    Service for generating embeddings.
+    Supports multiple providers: ollama, openai, sentence_transformers
+    """
     
-    def __init__(self):
+    def __init__(self, provider: Optional[str] = None):
+        self.provider = provider or settings.EMBEDDING_PROVIDER
         self.model = None
+        self.ollama_embeddings = None
+        self._dimension = 384  # Default dimension
         self._load_model()
     
     def _load_model(self):
-        """Load the embedding model."""
+        """Load the embedding model based on provider."""
         try:
-            self.model = SentenceTransformer(settings.EMBEDDING_MODEL)
-            logger.info(f"Loaded embedding model: {settings.EMBEDDING_MODEL}")
+            if self.provider == "ollama":
+                from langchain_ollama import OllamaEmbeddings
+                self.ollama_embeddings = OllamaEmbeddings(
+                    model=settings.OLLAMA_EMBEDDING_MODEL,
+                    base_url=settings.OLLAMA_BASE_URL
+                )
+                # Ollama nomic-embed-text produces 768-dim embeddings
+                self._dimension = 768
+                logger.info(f"Loaded Ollama embedding model: {settings.OLLAMA_EMBEDDING_MODEL}")
+                
+            elif self.provider == "openai":
+                from langchain_openai import OpenAIEmbeddings
+                self.ollama_embeddings = OpenAIEmbeddings()
+                self._dimension = 1536  # OpenAI ada-002 dimension
+                logger.info("Loaded OpenAI embedding model")
+                
+            elif self.provider == "sentence_transformers":
+                from sentence_transformers import SentenceTransformer
+                self.model = SentenceTransformer(settings.EMBEDDING_MODEL)
+                self._dimension = self.model.get_sentence_embedding_dimension()
+                logger.info(f"Loaded SentenceTransformer model: {settings.EMBEDDING_MODEL}")
+                
+            else:
+                raise ValueError(f"Unsupported embedding provider: {self.provider}")
+                
         except Exception as e:
             logger.error(f"Error loading embedding model: {e}")
             raise
     
+    @property
+    def dimension(self) -> int:
+        """Get the embedding dimension."""
+        return self._dimension
+    
     async def encode(self, texts: List[str]) -> List[np.ndarray]:
         """Generate embeddings for texts."""
         try:
-            embeddings = self.model.encode(texts, convert_to_numpy=True)
-            return [emb for emb in embeddings]
+            if self.provider in ["ollama", "openai"]:
+                # Use LangChain embeddings
+                embeddings = await asyncio.to_thread(
+                    self.ollama_embeddings.embed_documents, texts
+                )
+                return [np.array(emb, dtype=np.float32) for emb in embeddings]
+            else:
+                # Use SentenceTransformer
+                embeddings = self.model.encode(texts, convert_to_numpy=True)
+                return [emb.astype(np.float32) for emb in embeddings]
+                
         except Exception as e:
             logger.error(f"Error generating embeddings: {e}")
             return []
@@ -176,8 +245,15 @@ class EmbeddingService:
     async def encode_single(self, text: str) -> np.ndarray:
         """Generate embedding for a single text."""
         try:
-            embedding = self.model.encode([text], convert_to_numpy=True)
-            return embedding[0]
+            if self.provider in ["ollama", "openai"]:
+                embedding = await asyncio.to_thread(
+                    self.ollama_embeddings.embed_query, text
+                )
+                return np.array(embedding, dtype=np.float32)
+            else:
+                embedding = self.model.encode([text], convert_to_numpy=True)
+                return embedding[0].astype(np.float32)
+                
         except Exception as e:
             logger.error(f"Error generating single embedding: {e}")
             return np.array([])
@@ -185,14 +261,17 @@ class EmbeddingService:
 class VectorService:
     """Main vector service combining embedding and storage."""
     
-    def __init__(self):
-        self.embedding_service = EmbeddingService()
+    def __init__(self, embedding_provider: Optional[str] = None):
+        self.embedding_service = EmbeddingService(provider=embedding_provider)
         self.vector_store = self._create_vector_store()
     
     def _create_vector_store(self) -> VectorStore:
         """Create vector store based on configuration."""
         if settings.VECTOR_DB_TYPE == "faiss":
-            return FAISSVectorStore(settings.FAISS_INDEX_PATH)
+            return FAISSVectorStore(
+                settings.FAISS_INDEX_PATH,
+                dimension=self.embedding_service.dimension
+            )
         else:
             raise ValueError(f"Unsupported vector DB type: {settings.VECTOR_DB_TYPE}")
     
@@ -206,7 +285,8 @@ class VectorService:
                 return False
             
             ids = [doc['id'] for doc in documents]
-            metadata = [{k: v for k, v in doc.items() if k != 'content'} for doc in documents]
+            # Include content in metadata so it can be retrieved during search
+            metadata = [doc.copy() for doc in documents]
             
             return await self.vector_store.add_vectors(embeddings, metadata, ids)
             

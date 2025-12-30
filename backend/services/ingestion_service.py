@@ -26,6 +26,8 @@ try:
 except ImportError:
     UNSTRUCTURED_AVAILABLE = False
 
+from sqlalchemy import func
+
 from core.config import get_settings
 from core.database import get_db, DataSource, Document, DocumentChunk
 from services.vector_service import VectorService
@@ -272,7 +274,8 @@ class DocumentIngestionService:
         if pdf_strategy:
             self.pdf_strategy = pdf_strategy
         elif UNSTRUCTURED_AVAILABLE:
-            self.pdf_strategy = PDFExtractionStrategy.UNSTRUCTURED_HI_RES
+            # Use FAST strategy by default for better performance
+            self.pdf_strategy = PDFExtractionStrategy.UNSTRUCTURED_FAST
         else:
             self.pdf_strategy = PDFExtractionStrategy.PYPDF2_FALLBACK
             logger.warning("Unstructured.io not available, falling back to PyPDF2")

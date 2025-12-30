@@ -1,9 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Loader2, ExternalLink, FileText } from 'lucide-react';
+import { Send, Loader2, ExternalLink, FileText, Settings2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { tomorrow } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { api, ChatSession, ChatMessage } from '../services/api';
+import { api, ChatSession, ChatMessage, RAGTechnique } from '../services/api';
+
+const RAG_TECHNIQUES: { value: RAGTechnique; label: string; description: string }[] = [
+  { value: 'standard', label: 'Standard', description: 'Basic retrieval-augmented generation' },
+  { value: 'rag_fusion', label: 'RAG Fusion', description: 'Multiple query variations for better retrieval' },
+  { value: 'hyde', label: 'HyDE', description: 'Hypothetical document embeddings' },
+  { value: 'multi_query', label: 'Multi-Query', description: 'Multiple perspectives for comprehensive search' },
+];
 
 interface ChatInterfaceProps {
   session: ChatSession;
@@ -15,6 +22,8 @@ export function ChatInterface({ session, workspaceId }: ChatInterfaceProps) {
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
+  const [selectedTechnique, setSelectedTechnique] = useState<RAGTechnique>('standard');
+  const [showTechniqueSelector, setShowTechniqueSelector] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -58,7 +67,7 @@ export function ChatInterface({ session, workspaceId }: ChatInterfaceProps) {
     setMessages(prev => [...prev, tempUserMessage]);
 
     try {
-      const response = await api.sendChatMessage(session.id, userMessage);
+      const response = await api.sendChatMessage(session.id, userMessage, selectedTechnique);
       
       // Add assistant response
       const assistantMessage: ChatMessage = {
@@ -68,6 +77,7 @@ export function ChatInterface({ session, workspaceId }: ChatInterfaceProps) {
         metadata: {
           sources: response.sources,
           context_used: response.context_used,
+          technique: response.technique,
         },
         created_at: new Date().toISOString(),
       };
@@ -168,10 +178,47 @@ export function ChatInterface({ session, workspaceId }: ChatInterfaceProps) {
     <div className="flex flex-col h-full">
       {/* Chat Header */}
       <div className="bg-white border-b border-gray-200 px-6 py-4">
-        <h3 className="text-lg font-medium text-gray-900">{session.title}</h3>
-        <p className="text-sm text-gray-500">
-          Created {new Date(session.created_at).toLocaleDateString()}
-        </p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-medium text-gray-900">{session.title}</h3>
+            <p className="text-sm text-gray-500">
+              Created {new Date(session.created_at).toLocaleDateString()}
+            </p>
+          </div>
+          <div className="relative">
+            <button
+              onClick={() => setShowTechniqueSelector(!showTechniqueSelector)}
+              className="flex items-center space-x-2 px-3 py-2 text-sm bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+            >
+              <Settings2 className="h-4 w-4 text-gray-600" />
+              <span className="text-gray-700">{RAG_TECHNIQUES.find(t => t.value === selectedTechnique)?.label}</span>
+            </button>
+            {showTechniqueSelector && (
+              <div className="absolute right-0 mt-2 w-64 bg-white border border-gray-200 rounded-lg shadow-lg z-10">
+                <div className="p-2">
+                  <p className="text-xs font-medium text-gray-500 px-2 py-1">RAG Technique</p>
+                  {RAG_TECHNIQUES.map((technique) => (
+                    <button
+                      key={technique.value}
+                      onClick={() => {
+                        setSelectedTechnique(technique.value);
+                        setShowTechniqueSelector(false);
+                      }}
+                      className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors ${
+                        selectedTechnique === technique.value
+                          ? 'bg-primary-100 text-primary-700'
+                          : 'hover:bg-gray-100 text-gray-700'
+                      }`}
+                    >
+                      <div className="font-medium">{technique.label}</div>
+                      <div className="text-xs text-gray-500">{technique.description}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Messages */}
@@ -245,9 +292,14 @@ export function ChatInterface({ session, workspaceId }: ChatInterfaceProps) {
               )}
             </button>
           </div>
-          <p className="text-xs text-gray-500 mt-2">
-            Press Enter to send, Shift+Enter for new line
-          </p>
+          <div className="flex items-center justify-between mt-2">
+            <p className="text-xs text-gray-500">
+              Press Enter to send, Shift+Enter for new line
+            </p>
+            <p className="text-xs text-gray-500">
+              Using: <span className="font-medium text-primary-600">{RAG_TECHNIQUES.find(t => t.value === selectedTechnique)?.label}</span>
+            </p>
+          </div>
         </form>
       </div>
     </div>

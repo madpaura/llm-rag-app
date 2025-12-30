@@ -19,7 +19,7 @@ engine = create_engine(
     settings.DATABASE_URL,
     pool_size=settings.DATABASE_POOL_SIZE,
     max_overflow=settings.DATABASE_MAX_OVERFLOW,
-    echo=settings.DEBUG
+    echo=False  # Disable SQLAlchemy query logging
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
