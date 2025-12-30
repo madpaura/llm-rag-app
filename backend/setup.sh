@@ -116,6 +116,18 @@ else
     print_success "Virtual environment created"
 fi
 
+# Check and install PostgreSQL development libraries
+echo ""
+echo "Checking PostgreSQL development libraries..."
+if ! dpkg -l | grep -q libpq-dev; then
+    print_info "Installing PostgreSQL development libraries..."
+    sudo apt-get update > /dev/null 2>&1
+    sudo apt-get install -y libpq-dev python3-dev
+    print_success "PostgreSQL libraries installed"
+else
+    print_success "PostgreSQL libraries already installed"
+fi
+
 # Activate virtual environment
 source venv/bin/activate
 
