@@ -20,6 +20,14 @@ langchain-text-splitters>=0.3.0
 
 # LLM Integration
 ollama>=0.4.0
+httpx>=0.25.0
+
+# Vector Store
+faiss-cpu>=1.7.4
+chromadb>=0.4.0
+
+# Embeddings (fallback)
+sentence-transformers>=2.2.0
 
 # Data Processing
 GitPython>=3.1.0
@@ -29,5 +37,17 @@ beautifulsoup4>=4.12.0
 requests>=2.31.0
 aiofiles>=23.2.0
 
+# Advanced PDF Processing (Unstructured.io)
+unstructured[pdf]>=0.11.0
+pdf2image>=1.16.0
+pdfplumber>=0.10.0
+pytesseract>=0.3.10
+
 # Logging
 structlog>=23.2.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+reportlab>=4.0.0

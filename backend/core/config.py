@@ -28,15 +28,28 @@ class Settings(BaseSettings):
     FAISS_INDEX_PATH: str = "./data/faiss_index"
     
     # LLM Configuration
+    LLM_PROVIDER: str = "ollama"  # ollama, openai
     OPENAI_API_KEY: Optional[str] = None
     LLM_MODEL: str = "gpt-3.5-turbo"
     LLM_TEMPERATURE: float = 0.1
     LLM_MAX_TOKENS: int = 1000
     
+    # Ollama Configuration
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_LLM_MODEL: str = "gpt-oss:20b-cloud"
+    OLLAMA_EMBEDDING_MODEL: str = "nomic-embed-text"
+    OLLAMA_TIMEOUT: int = 120
+    
     # Embedding Configuration
+    EMBEDDING_PROVIDER: str = "ollama"  # ollama, openai, sentence_transformers
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
     CHUNK_SIZE: int = 1000
     CHUNK_OVERLAP: int = 200
+    
+    # RAG Configuration
+    DEFAULT_RAG_TECHNIQUE: str = "standard"  # standard, rag_fusion, hyde, multi_query
+    DEFAULT_RETRIEVAL_STRATEGY: str = "similarity"  # similarity, mmr, similarity_score_threshold
+    DEFAULT_TOP_K: int = 4
     
     # Security
     SECRET_KEY: str = "your-secret-key-change-in-production"

@@ -33,8 +33,9 @@ export function IngestionPage() {
   // Document form state
   const [documentForm, setDocumentForm] = useState({
     name: '',
-    file: null as File | null
+    files: [] as File[]
   });
+  const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number } | null>(null);
 
   useEffect(() => {
     if (workspaceId) {
@@ -116,31 +117,61 @@ export function IngestionPage() {
 
   const handleDocumentSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!workspaceId || !documentForm.file) return;
+    if (!workspaceId || documentForm.files.length === 0) return;
 
     setLoading(true);
     setError('');
     setSuccess('');
+    setUploadProgress({ current: 0, total: documentForm.files.length });
+
+    const results: { success: number; failed: number; totalChunks: number } = {
+      success: 0,
+      failed: 0,
+      totalChunks: 0
+    };
 
     try {
-      const result = await api.ingestDocument(
-        parseInt(workspaceId),
-        documentForm.name,
-        documentForm.file
-      );
+      for (let i = 0; i < documentForm.files.length; i++) {
+        const file = documentForm.files[i];
+        setUploadProgress({ current: i + 1, total: documentForm.files.length });
+        
+        try {
+          const name = documentForm.name 
+            ? (documentForm.files.length > 1 ? `${documentForm.name} - ${file.name}` : documentForm.name)
+            : file.name.replace(/\.[^/.]+$/, '');
+          
+          const result = await api.ingestDocument(
+            parseInt(workspaceId),
+            name,
+            file
+          );
 
-      if (result.success) {
-        setSuccess(`Successfully ingested document with ${result.documents_count} chunks`);
-        setDocumentForm({ name: '', file: null });
-        loadWorkspaceData();
-      } else {
-        setError(result.error || 'Failed to ingest document');
+          if (result.success) {
+            results.success++;
+            results.totalChunks += result.documents_count;
+          } else {
+            results.failed++;
+          }
+        } catch (err) {
+          results.failed++;
+          console.error(`Error ingesting ${file.name}:`, err);
+        }
       }
+
+      if (results.success > 0) {
+        setSuccess(`Successfully ingested ${results.success} file(s) with ${results.totalChunks} total chunks${results.failed > 0 ? `. ${results.failed} file(s) failed.` : ''}`);
+      } else {
+        setError('Failed to ingest all documents');
+      }
+      
+      setDocumentForm({ name: '', files: [] });
+      loadWorkspaceData();
     } catch (err) {
-      setError('Failed to ingest document');
+      setError('Failed to ingest documents');
       console.error('Document ingestion error:', err);
     } finally {
       setLoading(false);
+      setUploadProgress(null);
     }
   };
 
@@ -407,41 +438,68 @@ export function IngestionPage() {
           {/* Document Form */}
           {activeTab === 'document' && (
             <div className="bg-white rounded-lg shadow p-6">
-              <h3 className="text-lg font-medium text-gray-900 mb-4">Upload Document</h3>
+              <h3 className="text-lg font-medium text-gray-900 mb-4">Upload Documents</h3>
               <form onSubmit={handleDocumentSubmit} className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Name
+                    Name (optional)
                   </label>
                   <input
                     type="text"
-                    required
                     value={documentForm.name}
                     onChange={(e) => setDocumentForm({ ...documentForm, name: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
-                    placeholder="Document name"
+                    placeholder="Leave empty to use file names"
                   />
                 </div>
 
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    File
+                    Files
                   </label>
                   <input
                     type="file"
                     required
+                    multiple
                     accept=".pdf,.docx,.doc,.txt,.md"
-                    onChange={(e) => setDocumentForm({ ...documentForm, file: e.target.files?.[0] || null })}
+                    onChange={(e) => setDocumentForm({ ...documentForm, files: Array.from(e.target.files || []) })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
                   />
                   <p className="text-xs text-gray-500 mt-1">
-                    Supported formats: PDF, Word (.docx, .doc), Text (.txt), Markdown (.md)
+                    Supported formats: PDF, Word (.docx, .doc), Text (.txt), Markdown (.md). Select multiple files.
                   </p>
                 </div>
 
+                {documentForm.files.length > 0 && (
+                  <div className="bg-gray-50 rounded-md p-3">
+                    <p className="text-sm font-medium text-gray-700 mb-2">
+                      Selected files ({documentForm.files.length}):
+                    </p>
+                    <ul className="text-xs text-gray-600 space-y-1 max-h-32 overflow-y-auto">
+                      {documentForm.files.map((file, index) => (
+                        <li key={index} className="truncate">• {file.name}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {uploadProgress && (
+                  <div className="bg-blue-50 rounded-md p-3">
+                    <p className="text-sm text-blue-700">
+                      Uploading file {uploadProgress.current} of {uploadProgress.total}...
+                    </p>
+                    <div className="mt-2 w-full bg-blue-200 rounded-full h-2">
+                      <div 
+                        className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                        style={{ width: `${(uploadProgress.current / uploadProgress.total) * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+
                 <button
                   type="submit"
-                  disabled={loading || !documentForm.file}
+                  disabled={loading || documentForm.files.length === 0}
                   className="w-full flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 disabled:opacity-50"
                 >
                   {loading ? (
@@ -449,7 +507,7 @@ export function IngestionPage() {
                   ) : (
                     <Upload className="h-4 w-4 mr-2" />
                   )}
-                  Upload Document
+                  Upload {documentForm.files.length > 1 ? `${documentForm.files.length} Documents` : 'Document'}
                 </button>
               </form>
             </div>

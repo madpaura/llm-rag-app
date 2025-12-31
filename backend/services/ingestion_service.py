@@ -1,7 +1,7 @@
 """
 Data ingestion service for Git repositories, Confluence, and documents.
 """
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import os
 import tempfile
 import shutil
@@ -15,6 +15,19 @@ from bs4 import BeautifulSoup
 import PyPDF2
 from docx import Document as DocxDocument
 
+# Advanced PDF processing with Unstructured.io
+try:
+    from unstructured.partition.pdf import partition_pdf
+    from unstructured.documents.elements import (
+        Title, NarrativeText, ListItem, Table, Image, 
+        Header, Footer, PageBreak, FigureCaption
+    )
+    UNSTRUCTURED_AVAILABLE = True
+except ImportError:
+    UNSTRUCTURED_AVAILABLE = False
+
+from sqlalchemy import func
+
 from core.config import get_settings
 from core.database import get_db, DataSource, Document, DocumentChunk
 from services.vector_service import VectorService
@@ -23,16 +36,34 @@ logger = structlog.get_logger()
 settings = get_settings()
 
 class TextChunker:
-    """Service for chunking text into smaller pieces."""
+    """Service for chunking text into smaller pieces with line tracking."""
     
     def __init__(self, chunk_size: int = None, chunk_overlap: int = None):
         self.chunk_size = chunk_size or settings.CHUNK_SIZE
         self.chunk_overlap = chunk_overlap or settings.CHUNK_OVERLAP
     
+    def _build_line_index(self, text: str) -> List[int]:
+        """Build an index mapping character positions to line numbers."""
+        line_starts = [0]
+        for i, char in enumerate(text):
+            if char == '\n':
+                line_starts.append(i + 1)
+        return line_starts
+    
+    def _char_to_line(self, char_pos: int, line_starts: List[int]) -> int:
+        """Convert character position to line number (1-indexed)."""
+        for i, start in enumerate(line_starts):
+            if char_pos < start:
+                return i  # 1-indexed
+        return len(line_starts)
+    
     def chunk_text(self, text: str, metadata: Dict[str, Any] = None) -> List[Dict[str, Any]]:
-        """Split text into overlapping chunks."""
+        """Split text into overlapping chunks with line number tracking."""
         if not text.strip():
             return []
+        
+        # Build line index for accurate line number tracking
+        line_starts = self._build_line_index(text)
         
         chunks = []
         start = 0
@@ -48,15 +79,21 @@ class TextChunker:
                 last_newline = chunk_text.rfind('\n')
                 break_point = max(last_period, last_newline)
                 
-                if break_point > start + self.chunk_size // 2:
+                if break_point > self.chunk_size // 2:
                     chunk_text = text[start:start + break_point + 1]
                     end = start + break_point + 1
+            
+            # Calculate line numbers for this chunk
+            start_line = self._char_to_line(start, line_starts)
+            end_line = self._char_to_line(min(end, len(text) - 1), line_starts)
             
             chunk_metadata = metadata.copy() if metadata else {}
             chunk_metadata.update({
                 'chunk_index': chunk_index,
                 'start_char': start,
-                'end_char': end
+                'end_char': end,
+                'start_line': start_line,
+                'end_line': end_line
             })
             
             chunks.append({
@@ -242,13 +279,30 @@ class ConfluenceIngestionService:
             logger.warning(f"Failed to get content for page {page_id}: {e}")
             return None
 
+class PDFExtractionStrategy:
+    """Enum-like class for PDF extraction strategies."""
+    UNSTRUCTURED_HI_RES = "unstructured_hi_res"  # Best quality, slower
+    UNSTRUCTURED_FAST = "unstructured_fast"      # Faster, good quality
+    PYPDF2_FALLBACK = "pypdf2_fallback"          # Basic fallback
+
+
 class DocumentIngestionService:
-    """Service for ingesting PDF and Word documents."""
+    """Service for ingesting PDF and Word documents with advanced parsing."""
     
-    def __init__(self):
+    def __init__(self, pdf_strategy: str = None):
         self.chunker = TextChunker()
         self.upload_dir = Path(settings.UPLOAD_DIR)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Set PDF extraction strategy
+        if pdf_strategy:
+            self.pdf_strategy = pdf_strategy
+        elif UNSTRUCTURED_AVAILABLE:
+            # Use FAST strategy by default for better performance
+            self.pdf_strategy = PDFExtractionStrategy.UNSTRUCTURED_FAST
+        else:
+            self.pdf_strategy = PDFExtractionStrategy.PYPDF2_FALLBACK
+            logger.warning("Unstructured.io not available, falling back to PyPDF2")
     
     async def ingest_document(self, file_path: str, workspace_id: int, 
                              original_filename: str = None) -> Dict[str, Any]:
@@ -261,8 +315,9 @@ class DocumentIngestionService:
             logger.info(f"Starting document ingestion for {file_path}")
             
             # Extract text based on file type
+            extraction_metadata = {}
             if file_path.suffix.lower() == '.pdf':
-                content = await self._extract_pdf_text(file_path)
+                content, extraction_metadata = await self._extract_pdf_text(file_path)
             elif file_path.suffix.lower() in ['.docx', '.doc']:
                 content = await self._extract_docx_text(file_path)
             else:
@@ -273,6 +328,14 @@ class DocumentIngestionService:
             if not content:
                 return {"success": False, "error": "Could not extract text from document"}
             
+            # Build metadata with extraction info
+            doc_metadata = {
+                'original_filename': original_filename,
+                'file_size': file_path.stat().st_size
+            }
+            if extraction_metadata:
+                doc_metadata['extraction'] = extraction_metadata
+            
             documents = [{
                 'title': original_filename or file_path.name,
                 'content': content,
@@ -280,31 +343,200 @@ class DocumentIngestionService:
                 'file_type': file_path.suffix.lower(),
                 'source_type': 'document',
                 'workspace_id': workspace_id,
-                'metadata': {
-                    'original_filename': original_filename,
-                    'file_size': file_path.stat().st_size
-                }
+                'metadata': doc_metadata
             }]
             
             logger.info(f"Extracted text from document: {len(content)} characters")
-            return {"success": True, "documents": documents}
+            return {"success": True, "documents": documents, "extraction_metadata": extraction_metadata}
             
         except Exception as e:
             logger.error(f"Error ingesting document: {e}")
             return {"success": False, "error": str(e)}
     
-    async def _extract_pdf_text(self, file_path: Path) -> str:
-        """Extract text from PDF file."""
+    async def _extract_pdf_text(self, file_path: Path) -> Tuple[str, Dict[str, Any]]:
+        """
+        Extract text from PDF file using the configured strategy.
+        Returns tuple of (text, extraction_metadata).
+        """
+        extraction_metadata = {
+            "strategy_used": self.pdf_strategy,
+            "tables_found": 0,
+            "images_found": 0,
+            "pages_processed": 0,
+            "extraction_quality": "unknown"
+        }
+        
+        # Try Unstructured.io first if available and configured
+        if UNSTRUCTURED_AVAILABLE and self.pdf_strategy in [
+            PDFExtractionStrategy.UNSTRUCTURED_HI_RES,
+            PDFExtractionStrategy.UNSTRUCTURED_FAST
+        ]:
+            text, metadata = await self._extract_with_unstructured(file_path)
+            if text:
+                extraction_metadata.update(metadata)
+                return text, extraction_metadata
+            else:
+                logger.warning(f"Unstructured extraction failed, falling back to PyPDF2")
+                extraction_metadata["strategy_used"] = PDFExtractionStrategy.PYPDF2_FALLBACK
+        
+        # Fallback to PyPDF2
+        text, metadata = await self._extract_with_pypdf2(file_path)
+        extraction_metadata.update(metadata)
+        return text, extraction_metadata
+    
+    async def _extract_with_unstructured(self, file_path: Path) -> Tuple[str, Dict[str, Any]]:
+        """
+        Extract text using Unstructured.io with advanced parsing.
+        Handles tables, images, and complex layouts.
+        """
+        metadata = {
+            "tables_found": 0,
+            "images_found": 0,
+            "pages_processed": 0,
+            "extraction_quality": "high"
+        }
+        
         try:
-            text = ""
+            # Configure extraction strategy
+            strategy = "hi_res" if self.pdf_strategy == PDFExtractionStrategy.UNSTRUCTURED_HI_RES else "fast"
+            
+            logger.info(f"Extracting PDF with Unstructured.io ({strategy} strategy): {file_path}")
+            
+            # Partition the PDF
+            elements = partition_pdf(
+                filename=str(file_path),
+                strategy=strategy,
+                infer_table_structure=True,  # Extract tables as structured data
+                include_page_breaks=True,
+                extract_images_in_pdf=False,  # Set to True if you want image extraction
+            )
+            
+            # Process elements and build structured text
+            text_parts = []
+            current_page = 1
+            
+            for element in elements:
+                # Track page breaks
+                if isinstance(element, PageBreak):
+                    current_page += 1
+                    text_parts.append(f"\n--- Page {current_page} ---\n")
+                    continue
+                
+                # Handle different element types
+                if isinstance(element, Title):
+                    text_parts.append(f"\n## {element.text}\n")
+                elif isinstance(element, Header):
+                    text_parts.append(f"\n### {element.text}\n")
+                elif isinstance(element, Table):
+                    metadata["tables_found"] += 1
+                    # Convert table to markdown format
+                    table_text = self._table_to_markdown(element)
+                    text_parts.append(f"\n{table_text}\n")
+                elif isinstance(element, Image):
+                    metadata["images_found"] += 1
+                    text_parts.append(f"\n[Image: {element.text if element.text else 'Figure'}]\n")
+                elif isinstance(element, FigureCaption):
+                    text_parts.append(f"\n*Figure: {element.text}*\n")
+                elif isinstance(element, ListItem):
+                    text_parts.append(f"• {element.text}\n")
+                elif isinstance(element, (NarrativeText, Footer)):
+                    text_parts.append(f"{element.text}\n")
+                else:
+                    # Default handling for other element types
+                    if hasattr(element, 'text') and element.text:
+                        text_parts.append(f"{element.text}\n")
+            
+            metadata["pages_processed"] = current_page
+            
+            full_text = "\n".join(text_parts)
+            logger.info(f"Unstructured extraction complete: {len(full_text)} chars, "
+                       f"{metadata['tables_found']} tables, {metadata['images_found']} images")
+            
+            return full_text.strip(), metadata
+            
+        except Exception as e:
+            logger.error(f"Error in Unstructured PDF extraction: {e}")
+            metadata["extraction_quality"] = "failed"
+            return "", metadata
+    
+    def _table_to_markdown(self, table_element) -> str:
+        """
+        Convert an Unstructured Table element to markdown format.
+        """
+        try:
+            # Check if table has HTML representation
+            if hasattr(table_element, 'metadata') and hasattr(table_element.metadata, 'text_as_html'):
+                html = table_element.metadata.text_as_html
+                if html:
+                    return self._html_table_to_markdown(html)
+            
+            # Fallback to plain text representation
+            return f"[Table]\n{table_element.text}\n[/Table]"
+            
+        except Exception as e:
+            logger.warning(f"Error converting table to markdown: {e}")
+            return f"[Table]\n{table_element.text if hasattr(table_element, 'text') else 'Unable to parse table'}\n[/Table]"
+    
+    def _html_table_to_markdown(self, html: str) -> str:
+        """
+        Convert HTML table to markdown format.
+        """
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            table = soup.find('table')
+            if not table:
+                return html
+            
+            rows = table.find_all('tr')
+            if not rows:
+                return html
+            
+            markdown_rows = []
+            
+            for i, row in enumerate(rows):
+                cells = row.find_all(['td', 'th'])
+                cell_texts = [cell.get_text(strip=True) for cell in cells]
+                markdown_rows.append("| " + " | ".join(cell_texts) + " |")
+                
+                # Add header separator after first row
+                if i == 0:
+                    separator = "| " + " | ".join(["---"] * len(cells)) + " |"
+                    markdown_rows.append(separator)
+            
+            return "\n".join(markdown_rows)
+            
+        except Exception as e:
+            logger.warning(f"Error converting HTML table to markdown: {e}")
+            return html
+    
+    async def _extract_with_pypdf2(self, file_path: Path) -> Tuple[str, Dict[str, Any]]:
+        """
+        Extract text from PDF using PyPDF2 (basic fallback).
+        """
+        metadata = {
+            "tables_found": 0,
+            "images_found": 0,
+            "pages_processed": 0,
+            "extraction_quality": "basic"
+        }
+        
+        try:
+            text_parts = []
             with open(file_path, 'rb') as file:
                 pdf_reader = PyPDF2.PdfReader(file)
-                for page in pdf_reader.pages:
-                    text += page.extract_text() + "\n"
-            return text.strip()
+                metadata["pages_processed"] = len(pdf_reader.pages)
+                
+                for i, page in enumerate(pdf_reader.pages):
+                    page_text = page.extract_text()
+                    if page_text:
+                        text_parts.append(f"--- Page {i + 1} ---\n{page_text}")
+            
+            return "\n\n".join(text_parts).strip(), metadata
+            
         except Exception as e:
-            logger.error(f"Error extracting PDF text: {e}")
-            return ""
+            logger.error(f"Error extracting PDF text with PyPDF2: {e}")
+            metadata["extraction_quality"] = "failed"
+            return "", metadata
     
     async def _extract_docx_text(self, file_path: Path) -> str:
         """Extract text from Word document."""
@@ -403,7 +635,7 @@ class IngestionOrchestrator:
                     content=doc_data['content'],
                     file_path=doc_data.get('file_path'),
                     file_type=doc_data.get('file_type'),
-                    metadata=doc_data.get('metadata', {})
+                    doc_metadata=doc_data.get('metadata', {})
                 )
                 db.add(document)
                 db.flush()  # Get the ID
@@ -416,7 +648,7 @@ class IngestionOrchestrator:
                         document_id=document.id,
                         chunk_index=chunk_data['metadata']['chunk_index'],
                         content=chunk_data['content'],
-                        metadata=chunk_data['metadata']
+                        chunk_metadata=chunk_data['metadata']
                     )
                     db.add(chunk)
                     db.flush()

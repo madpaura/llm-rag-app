@@ -9,7 +9,7 @@ from typing import List, Optional, Dict, Any
 import structlog
 import json
 
-from core.database import get_db, ChatSession, Workspace
+from core.database import get_db, ChatSession, ChatMessage, Workspace
 from services.query_service import RAGQueryService, ChatService
 
 logger = structlog.get_logger()
@@ -20,6 +20,7 @@ class QueryRequest(BaseModel):
     question: str
     workspace_id: int
     k: Optional[int] = 5
+    rag_technique: Optional[str] = None  # standard, rag_fusion, hyde, multi_query
 
 class QueryResponse(BaseModel):
     success: bool
@@ -27,10 +28,12 @@ class QueryResponse(BaseModel):
     sources: List[Dict[str, Any]]
     context_used: bool
     retrieved_docs_count: int
+    technique: Optional[str] = None
 
 class ChatMessageRequest(BaseModel):
     message: str
     session_id: int
+    rag_technique: Optional[str] = None  # standard, rag_fusion, hyde, multi_query
 
 class ChatSessionCreate(BaseModel):
     workspace_id: int
@@ -57,7 +60,8 @@ async def search_knowledge_base(
         result = await rag_service.query(
             question=request.question,
             workspace_id=request.workspace_id,
-            k=request.k
+            k=request.k,
+            rag_technique=request.rag_technique
         )
         
         if not result["success"]:
@@ -71,7 +75,8 @@ async def search_knowledge_base(
             answer=result["answer"],
             sources=result.get("sources", []),
             context_used=result.get("context_used", False),
-            retrieved_docs_count=result.get("retrieved_docs_count", 0)
+            retrieved_docs_count=result.get("retrieved_docs_count", 0),
+            technique=result.get("technique", "standard")
         )
         
     except HTTPException:
@@ -194,7 +199,8 @@ async def send_chat_message(
             message=request.message,
             session_id=request.session_id,
             workspace_id=session.workspace_id,
-            user_id=user_id
+            user_id=user_id,
+            rag_technique=request.rag_technique
         )
         
         if not result["success"]:
@@ -208,7 +214,8 @@ async def send_chat_message(
             "message_id": result["message_id"],
             "answer": result["answer"],
             "sources": result.get("sources", []),
-            "context_used": result.get("context_used", False)
+            "context_used": result.get("context_used", False),
+            "technique": result.get("technique", "standard")
         }
         
     except HTTPException:
@@ -263,6 +270,50 @@ async def get_chat_history(
             detail=str(e)
         )
 
+@router.delete("/chat/sessions/{session_id}")
+async def delete_chat_session(
+    session_id: int,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Delete a chat session and all its messages."""
+    try:
+        # TODO: Get user from token and verify access
+        user_id = 1  # Mock user ID
+        
+        session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Chat session not found"
+            )
+        
+        if session.user_id != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to chat session"
+            )
+        
+        # Delete all messages in the session
+        db.query(ChatMessage).filter(ChatMessage.session_id == session_id).delete()
+        
+        # Delete the session
+        db.delete(session)
+        db.commit()
+        
+        return {"success": True, "message": "Chat session deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deleting chat session: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
 # WebSocket endpoint for real-time chat
 @router.websocket("/chat/ws/{session_id}")
 async def websocket_chat(websocket: WebSocket, session_id: int):
@@ -284,7 +335,8 @@ async def websocket_chat(websocket: WebSocket, session_id: int):
                 message=message_data["message"],
                 session_id=session_id,
                 workspace_id=message_data["workspace_id"],
-                user_id=1  # TODO: Get from auth
+                user_id=1,  # TODO: Get from auth
+                rag_technique=message_data.get("rag_technique")
             )
             
             # Send response back to client
@@ -293,6 +345,7 @@ async def websocket_chat(websocket: WebSocket, session_id: int):
                 "success": result["success"],
                 "answer": result.get("answer", ""),
                 "sources": result.get("sources", []),
+                "technique": result.get("technique", "standard"),
                 "error": result.get("error")
             }))
             

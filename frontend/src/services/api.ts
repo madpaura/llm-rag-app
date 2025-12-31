@@ -82,21 +82,58 @@ export interface ChatMessage {
   created_at: string;
 }
 
+export type RAGTechnique = 'standard' | 'rag_fusion' | 'hyde' | 'multi_query';
+
+export interface CitationSource {
+  id: number;
+  title: string;
+  source: string;
+  score: number;
+  content_preview: string;
+  document_id?: number;
+  chunk_id?: number;
+  start_line?: number;
+  end_line?: number;
+  page_number?: number;
+  file_path?: string;
+  repo_url?: string;
+  page_url?: string;
+}
+
 export interface QueryResponse {
   success: boolean;
   answer: string;
-  sources: Array<{
-    id: number;
-    title: string;
-    source: string;
-    score: number;
-    content_preview: string;
-    repo_url?: string;
-    page_url?: string;
-    file_path?: string;
-  }>;
+  sources: CitationSource[];
   context_used: boolean;
   retrieved_docs_count: number;
+  technique?: string;
+}
+
+export interface DocumentContent {
+  id: number;
+  title: string;
+  file_path?: string;
+  file_type?: string;
+  content: string;
+  lines: string[];
+  total_lines: number;
+  metadata?: any;
+  created_at: string;
+}
+
+export interface ChunkLocation {
+  chunk_id: number;
+  document_id: number;
+  document_title: string;
+  file_path?: string;
+  chunk_index: number;
+  content: string;
+  start_line: number;
+  end_line: number;
+  start_char: number;
+  end_char: number;
+  page_number?: number;
+  metadata?: any;
 }
 
 export interface IngestionResponse {
@@ -153,6 +190,11 @@ export const api = {
 
   async getWorkspaceMembers(workspaceId: number): Promise<any[]> {
     const response = await apiClient.get(`/api/workspaces/${workspaceId}/members`);
+    return response.data;
+  },
+
+  async deleteWorkspace(workspaceId: number): Promise<{ success: boolean; message: string }> {
+    const response = await apiClient.delete(`/api/workspaces/${workspaceId}`);
     return response.data;
   },
 
@@ -217,12 +259,14 @@ export const api = {
   async searchKnowledgeBase(
     question: string,
     workspaceId: number,
-    k: number = 5
+    k: number = 5,
+    ragTechnique?: RAGTechnique
   ): Promise<QueryResponse> {
     const response = await apiClient.post('/api/query/search', {
       question,
       workspace_id: workspaceId,
       k,
+      rag_technique: ragTechnique,
     });
     return response.data;
   },
@@ -240,16 +284,22 @@ export const api = {
     return response.data;
   },
 
-  async sendChatMessage(sessionId: number, message: string): Promise<{
+  async sendChatMessage(
+    sessionId: number, 
+    message: string,
+    ragTechnique?: RAGTechnique
+  ): Promise<{
     success: boolean;
     message_id: number;
     answer: string;
     sources: any[];
     context_used: boolean;
+    technique?: string;
   }> {
     const response = await apiClient.post('/api/query/chat/message', {
       session_id: sessionId,
       message,
+      rag_technique: ragTechnique,
     });
     return response.data;
   },
@@ -262,9 +312,36 @@ export const api = {
     return response.data;
   },
 
+  async deleteChatSession(sessionId: number): Promise<{ success: boolean; message: string }> {
+    const response = await apiClient.delete(`/api/query/chat/sessions/${sessionId}`);
+    return response.data;
+  },
+
   // Health checks
   async healthCheck(): Promise<{ status: string; service: string; version: string }> {
     const response = await apiClient.get('/health/');
+    return response.data;
+  },
+
+  // Document viewer
+  async getDocument(documentId: number): Promise<DocumentContent> {
+    const response = await apiClient.get(`/api/ingestion/documents/${documentId}`);
+    return response.data;
+  },
+
+  async getDocumentChunk(documentId: number, chunkId: number): Promise<ChunkLocation> {
+    const response = await apiClient.get(`/api/ingestion/documents/${documentId}/chunk/${chunkId}`);
+    return response.data;
+  },
+
+  async getWorkspaceDocuments(workspaceId: number): Promise<Array<{
+    id: number;
+    title: string;
+    file_path?: string;
+    file_type?: string;
+    created_at: string;
+  }>> {
+    const response = await apiClient.get(`/api/ingestion/documents/by-workspace/${workspaceId}`);
     return response.data;
   },
 };
