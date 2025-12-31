@@ -154,6 +154,46 @@ class ChatMessage(Base):
     # Relationships
     session = relationship("ChatSession", back_populates="messages")
 
+
+class CodeUnit(Base):
+    """Code units extracted from source files (functions, classes, files)."""
+    __tablename__ = "code_units"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id"))
+    unit_type = Column(String, nullable=False)  # function, method, class, struct, file
+    name = Column(String, nullable=False)
+    signature = Column(String, nullable=True)  # Function signature or class declaration
+    code = Column(Text, nullable=False)  # Full source code of the unit
+    summary = Column(Text, nullable=True)  # LLM-generated summary
+    start_line = Column(Integer, nullable=False)
+    end_line = Column(Integer, nullable=False)
+    parent_id = Column(Integer, ForeignKey("code_units.id"), nullable=True)  # Parent class/file
+    language = Column(String, nullable=False)  # c, cpp
+    vector_id = Column(String, nullable=True)  # ID in vector database
+    unit_metadata = Column(JSON, nullable=True)  # Additional metadata (dependencies, patterns)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    document = relationship("Document", backref="code_units")
+    parent = relationship("CodeUnit", remote_side=[id], backref="children")
+
+
+class CodeCallGraph(Base):
+    """Call graph relationships between code units."""
+    __tablename__ = "code_call_graph"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    caller_id = Column(Integer, ForeignKey("code_units.id"), nullable=False)
+    callee_name = Column(String, nullable=False)  # Name of called function
+    callee_id = Column(Integer, ForeignKey("code_units.id"), nullable=True)  # Resolved callee (if found)
+    call_line = Column(Integer, nullable=True)  # Line number of the call
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    caller = relationship("CodeUnit", foreign_keys=[caller_id], backref="outgoing_calls")
+    callee = relationship("CodeUnit", foreign_keys=[callee_id], backref="incoming_calls")
+
 # Database dependency
 def get_db() -> Generator[Session, None, None]:
     """Database dependency for FastAPI."""
