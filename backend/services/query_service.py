@@ -80,7 +80,16 @@ class LLMService:
         """Generate response using Ollama."""
         system_prompt = """You are a helpful AI assistant that answers questions based on the provided context. 
 Always cite your sources when possible and be clear about what information comes from the context vs your general knowledge.
-If the context doesn't contain enough information to answer the question, say so clearly."""
+If the context doesn't contain enough information to answer the question, say so clearly.
+
+IMPORTANT: When formatting your response:
+- Use proper markdown formatting with line breaks
+- For tables, put each row on a separate line:
+  | Header1 | Header2 |
+  |---------|---------|
+  | Cell1   | Cell2   |
+- Use bullet points for lists
+- Use **bold** for emphasis"""
         
         if context:
             full_prompt = f"{system_prompt}\n\nContext:\n{context}\n\nQuestion: {prompt}\n\nAnswer:"
@@ -110,7 +119,16 @@ If the context doesn't contain enough information to answer the question, say so
                 "role": "system",
                 "content": """You are a helpful AI assistant that answers questions based on the provided context. 
 Always cite your sources when possible and be clear about what information comes from the context vs your general knowledge.
-If the context doesn't contain enough information to answer the question, say so clearly."""
+If the context doesn't contain enough information to answer the question, say so clearly.
+
+IMPORTANT: When formatting your response:
+- Use proper markdown formatting with line breaks
+- For tables, put each row on a separate line:
+  | Header1 | Header2 |
+  |---------|---------|
+  | Cell1   | Cell2   |
+- Use bullet points for lists
+- Use **bold** for emphasis"""
             }
         ]
         

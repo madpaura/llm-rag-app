@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Send, Loader2, ExternalLink, FileText, Settings2, Eye } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { tomorrow } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { api, ChatSession, ChatMessage, RAGTechnique, CitationSource } from '../services/api';
@@ -114,8 +115,9 @@ export function ChatInterface({ session, workspaceId }: ChatInterfaceProps) {
     return (
       <div key={message.id} className="flex justify-start mb-4">
         <div className="max-w-4xl bg-white border border-gray-200 rounded-lg px-4 py-3">
-          <div className="prose prose-sm max-w-none">
+          <div className="prose prose-sm max-w-none prose-table:border-collapse prose-table:w-full prose-th:border prose-th:border-gray-300 prose-th:bg-gray-100 prose-th:px-3 prose-th:py-2 prose-td:border prose-td:border-gray-300 prose-td:px-3 prose-td:py-2">
             <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
               components={{
                 code({ className, children, ...props }: any) {
                   const match = /language-(\w+)/.exec(className || '');
@@ -134,6 +136,35 @@ export function ChatInterface({ session, workspaceId }: ChatInterfaceProps) {
                       {children}
                     </code>
                   );
+                },
+                table({ children, ...props }: any) {
+                  return (
+                    <div className="overflow-x-auto my-4">
+                      <table className="min-w-full border-collapse border border-gray-300" {...props}>
+                        {children}
+                      </table>
+                    </div>
+                  );
+                },
+                thead({ children, ...props }: any) {
+                  return <thead className="bg-gray-100" {...props}>{children}</thead>;
+                },
+                th({ children, ...props }: any) {
+                  return (
+                    <th className="border border-gray-300 px-3 py-2 text-left font-semibold text-gray-700" {...props}>
+                      {children}
+                    </th>
+                  );
+                },
+                td({ children, ...props }: any) {
+                  return (
+                    <td className="border border-gray-300 px-3 py-2 text-gray-600" {...props}>
+                      {children}
+                    </td>
+                  );
+                },
+                tr({ children, ...props }: any) {
+                  return <tr className="hover:bg-gray-50" {...props}>{children}</tr>;
                 },
               }}
             >

@@ -34,10 +34,25 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app
 app = FastAPI(
     title="Organization RAG API",
-    description="Retrieval-Augmented Generation API for developer onboarding",
+    description="""
+## RAG-powered Knowledge Base API
+
+This API provides Retrieval-Augmented Generation capabilities for developer onboarding and knowledge management.
+
+### Features
+- **Document Ingestion**: Upload documents, connect Git repos, or Confluence spaces
+- **RAG Queries**: Ask questions and get AI-powered answers with citations
+- **Multiple RAG Techniques**: Standard, RAG-Fusion, HyDE, Multi-Query
+- **Workspace Management**: Organize knowledge bases by team or project
+- **Chat Sessions**: Maintain conversation history with context
+
+### Authentication
+All endpoints (except health checks) require Bearer token authentication.
+    """,
     version="1.0.0",
-    docs_url="/docs" if settings.DEBUG else None,
-    redoc_url="/redoc" if settings.DEBUG else None,
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
     lifespan=lifespan
 )
 
