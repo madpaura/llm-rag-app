@@ -1,13 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { ArrowLeft, GitBranch, Globe, Upload, Loader2, CheckCircle, XCircle, Clock } from 'lucide-react';
-import { api, DataSource, Workspace } from '../services/api';
+import { ArrowLeft, GitBranch, Globe, Upload, Loader2, CheckCircle, XCircle, Clock, Code, FileCode } from 'lucide-react';
+import { api, DataSource, Workspace, CodeIngestionStats } from '../services/api';
 
 export function IngestionPage() {
   const { workspaceId } = useParams<{ workspaceId: string }>();
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [dataSources, setDataSources] = useState<DataSource[]>([]);
-  const [activeTab, setActiveTab] = useState<'git' | 'confluence' | 'document'>('git');
+  const [activeTab, setActiveTab] = useState<'git' | 'confluence' | 'document' | 'code'>('git');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -36,6 +36,14 @@ export function IngestionPage() {
     files: [] as File[]
   });
   const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number } | null>(null);
+
+  // Code form state
+  const [codeForm, setCodeForm] = useState({
+    name: '',
+    files: [] as File[],
+    directoryPath: ''
+  });
+  const [codeStats, setCodeStats] = useState<CodeIngestionStats | null>(null);
 
   useEffect(() => {
     if (workspaceId) {
@@ -175,6 +183,38 @@ export function IngestionPage() {
     }
   };
 
+  const handleCodeSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!workspaceId || codeForm.files.length === 0) return;
+
+    setLoading(true);
+    setError('');
+    setSuccess('');
+    setCodeStats(null);
+
+    try {
+      const result = await api.ingestCodeFiles(
+        parseInt(workspaceId),
+        codeForm.name || 'Code Files',
+        codeForm.files
+      );
+
+      if (result.success) {
+        setCodeStats(result.stats);
+        setSuccess(`Successfully processed ${result.stats.files_processed} files: ${result.stats.functions_extracted} functions, ${result.stats.classes_extracted} classes, ${result.stats.structs_extracted} structs`);
+        setCodeForm({ name: '', files: [], directoryPath: '' });
+        loadWorkspaceData();
+      } else {
+        setError('Failed to ingest code files');
+      }
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to ingest code files');
+      console.error('Code ingestion error:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const getStatusIcon = (status: string) => {
     switch (status) {
       case 'completed':
@@ -244,6 +284,17 @@ export function IngestionPage() {
               >
                 <Upload className="h-4 w-4 inline mr-2" />
                 Documents
+              </button>
+              <button
+                onClick={() => setActiveTab('code')}
+                className={`py-2 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'code'
+                    ? 'border-primary-500 text-primary-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                <Code className="h-4 w-4 inline mr-2" />
+                C/C++ Code
               </button>
             </nav>
           </div>
@@ -510,6 +561,113 @@ export function IngestionPage() {
                   Upload {documentForm.files.length > 1 ? `${documentForm.files.length} Documents` : 'Document'}
                 </button>
               </form>
+            </div>
+          )}
+
+          {/* C/C++ Code Form */}
+          {activeTab === 'code' && (
+            <div className="bg-white rounded-lg shadow p-6">
+              <h3 className="text-lg font-medium text-gray-900 mb-4">Ingest C/C++ Source Code</h3>
+              <p className="text-sm text-gray-600 mb-4">
+                Upload C/C++ source files for AST-based parsing. Functions, classes, and structs will be 
+                extracted and summarized using AI. Embeddings are created at function/class/file level.
+              </p>
+              
+              <form onSubmit={handleCodeSubmit} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Name
+                  </label>
+                  <input
+                    type="text"
+                    value={codeForm.name}
+                    onChange={(e) => setCodeForm({ ...codeForm, name: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                    placeholder="My C++ Project"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Source Files
+                  </label>
+                  <input
+                    type="file"
+                    required
+                    multiple
+                    accept=".c,.h,.cpp,.cc,.cxx,.hpp,.hxx,.hh"
+                    onChange={(e) => setCodeForm({ ...codeForm, files: Array.from(e.target.files || []) })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Supported: .c, .h, .cpp, .cc, .cxx, .hpp, .hxx, .hh
+                  </p>
+                </div>
+
+                {codeForm.files.length > 0 && (
+                  <div className="bg-gray-50 rounded-md p-3">
+                    <p className="text-sm font-medium text-gray-700 mb-2">
+                      Selected files ({codeForm.files.length}):
+                    </p>
+                    <ul className="text-xs text-gray-600 space-y-1 max-h-32 overflow-y-auto">
+                      {codeForm.files.map((file, index) => (
+                        <li key={index} className="flex items-center truncate">
+                          <FileCode className="h-3 w-3 mr-1 text-gray-400" />
+                          {file.name}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {codeStats && (
+                  <div className="bg-green-50 rounded-md p-4">
+                    <p className="text-sm font-medium text-green-800 mb-2">Ingestion Results:</p>
+                    <div className="grid grid-cols-2 gap-2 text-xs text-green-700">
+                      <div>Files processed: <span className="font-medium">{codeStats.files_processed}</span></div>
+                      <div>Functions: <span className="font-medium">{codeStats.functions_extracted}</span></div>
+                      <div>Classes: <span className="font-medium">{codeStats.classes_extracted}</span></div>
+                      <div>Structs: <span className="font-medium">{codeStats.structs_extracted}</span></div>
+                      <div>Summaries: <span className="font-medium">{codeStats.summaries_generated}</span></div>
+                      <div>Embeddings: <span className="font-medium">{codeStats.embeddings_created}</span></div>
+                    </div>
+                    {codeStats.errors.length > 0 && (
+                      <div className="mt-2 text-xs text-red-600">
+                        Errors: {codeStats.errors.join(', ')}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={loading || codeForm.files.length === 0}
+                  className="w-full flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 disabled:opacity-50"
+                >
+                  {loading ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                      Processing (this may take a while)...
+                    </>
+                  ) : (
+                    <>
+                      <Code className="h-4 w-4 mr-2" />
+                      Ingest {codeForm.files.length} Code File{codeForm.files.length !== 1 ? 's' : ''}
+                    </>
+                  )}
+                </button>
+              </form>
+
+              <div className="mt-6 p-4 bg-blue-50 rounded-md">
+                <h4 className="text-sm font-medium text-blue-800 mb-2">What happens during code ingestion:</h4>
+                <ul className="text-xs text-blue-700 space-y-1">
+                  <li>• <strong>AST Parsing:</strong> tree-sitter extracts functions, classes, structs</li>
+                  <li>• <strong>Summary Generation:</strong> LLM generates descriptions for each code unit</li>
+                  <li>• <strong>Hierarchical Processing:</strong> Function → Class → File summaries</li>
+                  <li>• <strong>Call Graph:</strong> Function call relationships are tracked</li>
+                  <li>• <strong>Embeddings:</strong> Code + summary combined for semantic search</li>
+                </ul>
+              </div>
             </div>
           )}
         </div>

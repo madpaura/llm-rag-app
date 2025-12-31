@@ -144,6 +144,38 @@ export interface IngestionResponse {
   error?: string;
 }
 
+export interface CodeIngestionStats {
+  files_processed: number;
+  functions_extracted: number;
+  classes_extracted: number;
+  structs_extracted: number;
+  summaries_generated: number;
+  embeddings_created: number;
+  errors: string[];
+}
+
+export interface CodeIngestionResponse {
+  success: boolean;
+  data_source_id: number;
+  message: string;
+  stats: CodeIngestionStats;
+}
+
+export interface CodeUnit {
+  id: number;
+  unit_type: string;
+  name: string;
+  signature?: string;
+  summary?: string;
+  code?: string;
+  start_line: number;
+  end_line: number;
+  language: string;
+  parent_id?: number;
+  calls?: Array<{ name: string; line: number; resolved: boolean }>;
+  called_by?: Array<{ caller_id: number; line: number }>;
+}
+
 // API functions
 export const api = {
   // Authentication
@@ -342,6 +374,54 @@ export const api = {
     created_at: string;
   }>> {
     const response = await apiClient.get(`/api/ingestion/documents/by-workspace/${workspaceId}`);
+    return response.data;
+  },
+
+  // Code ingestion
+  async ingestCodeFiles(
+    workspaceId: number,
+    name: string,
+    files: File[]
+  ): Promise<CodeIngestionResponse> {
+    const formData = new FormData();
+    formData.append('workspace_id', workspaceId.toString());
+    formData.append('name', name);
+    files.forEach(file => formData.append('files', file));
+
+    const response = await apiClient.post('/api/ingestion/code', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  },
+
+  async ingestCodeDirectory(
+    workspaceId: number,
+    name: string,
+    directoryPath: string
+  ): Promise<CodeIngestionResponse> {
+    const response = await apiClient.post('/api/ingestion/code/directory', {
+      workspace_id: workspaceId,
+      name,
+      directory_path: directoryPath,
+    });
+    return response.data;
+  },
+
+  async getCodeUnits(documentId: number): Promise<CodeUnit[]> {
+    const response = await apiClient.get(`/api/ingestion/code/units/${documentId}`);
+    return response.data;
+  },
+
+  async getCodeUnitDetail(unitId: number): Promise<CodeUnit> {
+    const response = await apiClient.get(`/api/ingestion/code/units/${unitId}/detail`);
+    return response.data;
+  },
+
+  async getCallGraph(workspaceId: number): Promise<{
+    nodes: Array<{ id: number; name: string; type: string; file: string }>;
+    edges: Array<{ source: number; target: number | null; target_name: string; resolved: boolean }>;
+  }> {
+    const response = await apiClient.get(`/api/ingestion/code/call-graph/${workspaceId}`);
     return response.data;
   },
 };

@@ -11,9 +11,10 @@ import aiofiles
 import os
 from pathlib import Path
 
-from core.database import get_db, DataSource, Workspace, Document, DocumentChunk
+from core.database import get_db, DataSource, Workspace, Document, DocumentChunk, CodeUnit, CodeCallGraph
 from core.config import get_settings
 from services.ingestion_service import IngestionOrchestrator
+from services.code_ingestion_service import CodeIngestionService
 
 logger = structlog.get_logger()
 router = APIRouter()
@@ -35,6 +36,12 @@ class ConfluenceIngestionRequest(BaseModel):
     base_url: Optional[str] = None
     username: Optional[str] = None
     api_token: Optional[str] = None
+
+
+class CodeIngestionRequest(BaseModel):
+    workspace_id: int
+    name: str
+    directory_path: Optional[str] = None  # For local directory ingestion
 
 class DataSourceResponse(BaseModel):
     id: int
@@ -404,3 +411,283 @@ async def get_workspace_documents(
         }
         for doc in documents
     ]
+
+
+@router.post("/code")
+async def ingest_code_files(
+    workspace_id: int = Form(...),
+    name: str = Form(...),
+    files: List[UploadFile] = File(...),
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Ingest C/C++ source code files with AST-based parsing.
+    
+    Extracts functions, classes, structs and generates LLM summaries
+    for each code unit. Creates embeddings at function/class/file level.
+    
+    Supported extensions: .c, .h, .cpp, .cc, .cxx, .hpp, .hxx, .hh
+    """
+    try:
+        # Verify workspace exists
+        workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+        if not workspace:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Workspace not found"
+            )
+        
+        # Filter supported files
+        supported_extensions = {'.c', '.h', '.cpp', '.cc', '.cxx', '.hpp', '.hxx', '.hh'}
+        code_files = []
+        
+        for file in files:
+            ext = Path(file.filename).suffix.lower()
+            if ext in supported_extensions:
+                content = await file.read()
+                code_files.append({
+                    "path": file.filename,
+                    "content": content.decode('utf-8', errors='replace')
+                })
+        
+        if not code_files:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No supported C/C++ files found. Supported: .c, .h, .cpp, .cc, .cxx, .hpp, .hxx, .hh"
+            )
+        
+        # Create data source
+        data_source = DataSource(
+            workspace_id=workspace_id,
+            name=name,
+            source_type="code",
+            status="processing",
+            config={"file_count": len(code_files)}
+        )
+        db.add(data_source)
+        db.commit()
+        
+        # Process code files
+        code_service = CodeIngestionService()
+        stats = await code_service.ingest_code_files(
+            files=code_files,
+            workspace_id=workspace_id,
+            data_source_id=data_source.id,
+            db=db
+        )
+        
+        # Update data source status
+        from datetime import datetime
+        data_source.status = "completed" if not stats["errors"] else "completed_with_errors"
+        data_source.last_ingested = datetime.utcnow()
+        db.commit()
+        
+        return {
+            "success": True,
+            "data_source_id": data_source.id,
+            "message": f"Processed {stats['files_processed']} files",
+            "stats": stats
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Code ingestion failed: {e}")
+        if 'data_source' in locals():
+            data_source.status = "failed"
+            db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+@router.post("/code/directory")
+async def ingest_code_directory(
+    request: CodeIngestionRequest,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Ingest C/C++ source code from a local directory.
+    
+    Recursively scans the directory for C/C++ files and processes them
+    with AST-based parsing and LLM summary generation.
+    """
+    try:
+        # Verify workspace exists
+        workspace = db.query(Workspace).filter(Workspace.id == request.workspace_id).first()
+        if not workspace:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Workspace not found"
+            )
+        
+        # Verify directory exists
+        if not request.directory_path or not os.path.isdir(request.directory_path):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid directory path"
+            )
+        
+        # Create data source
+        data_source = DataSource(
+            workspace_id=request.workspace_id,
+            name=request.name,
+            source_type="code",
+            source_url=request.directory_path,
+            status="processing"
+        )
+        db.add(data_source)
+        db.commit()
+        
+        # Process directory
+        code_service = CodeIngestionService()
+        stats = await code_service.ingest_code_directory(
+            directory=request.directory_path,
+            workspace_id=request.workspace_id,
+            data_source_id=data_source.id,
+            db=db
+        )
+        
+        # Update data source status
+        from datetime import datetime
+        data_source.status = "completed" if not stats["errors"] else "completed_with_errors"
+        data_source.last_ingested = datetime.utcnow()
+        db.commit()
+        
+        return {
+            "success": True,
+            "data_source_id": data_source.id,
+            "message": f"Processed {stats['files_processed']} files",
+            "stats": stats
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Code directory ingestion failed: {e}")
+        if 'data_source' in locals():
+            data_source.status = "failed"
+            db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+@router.get("/code/units/{document_id}")
+async def get_code_units(
+    document_id: int,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Get all code units for a document."""
+    units = db.query(CodeUnit).filter(CodeUnit.document_id == document_id).all()
+    
+    return [
+        {
+            "id": unit.id,
+            "unit_type": unit.unit_type,
+            "name": unit.name,
+            "signature": unit.signature,
+            "summary": unit.summary,
+            "start_line": unit.start_line,
+            "end_line": unit.end_line,
+            "language": unit.language,
+            "parent_id": unit.parent_id
+        }
+        for unit in units
+    ]
+
+
+@router.get("/code/units/{unit_id}/detail")
+async def get_code_unit_detail(
+    unit_id: int,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Get detailed information about a code unit including code and call graph."""
+    unit = db.query(CodeUnit).filter(CodeUnit.id == unit_id).first()
+    if not unit:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Code unit not found"
+        )
+    
+    # Get outgoing calls
+    outgoing = db.query(CodeCallGraph).filter(CodeCallGraph.caller_id == unit_id).all()
+    
+    # Get incoming calls
+    incoming = db.query(CodeCallGraph).filter(CodeCallGraph.callee_id == unit_id).all()
+    
+    return {
+        "id": unit.id,
+        "unit_type": unit.unit_type,
+        "name": unit.name,
+        "signature": unit.signature,
+        "code": unit.code,
+        "summary": unit.summary,
+        "start_line": unit.start_line,
+        "end_line": unit.end_line,
+        "language": unit.language,
+        "parent_id": unit.parent_id,
+        "metadata": unit.unit_metadata,
+        "calls": [{"name": c.callee_name, "line": c.call_line, "resolved": c.callee_id is not None} for c in outgoing],
+        "called_by": [{"caller_id": c.caller_id, "line": c.call_line} for c in incoming]
+    }
+
+
+@router.get("/code/call-graph/{workspace_id}")
+async def get_workspace_call_graph(
+    workspace_id: int,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Get the call graph for all code in a workspace."""
+    # Get all documents in workspace
+    data_sources = db.query(DataSource).filter(
+        DataSource.workspace_id == workspace_id,
+        DataSource.source_type == "code"
+    ).all()
+    
+    if not data_sources:
+        return {"nodes": [], "edges": []}
+    
+    ds_ids = [ds.id for ds in data_sources]
+    documents = db.query(Document).filter(Document.data_source_id.in_(ds_ids)).all()
+    doc_ids = [d.id for d in documents]
+    
+    # Get all code units
+    units = db.query(CodeUnit).filter(
+        CodeUnit.document_id.in_(doc_ids),
+        CodeUnit.unit_type.in_(['function', 'method'])
+    ).all()
+    
+    unit_ids = [u.id for u in units]
+    
+    # Get call graph edges
+    calls = db.query(CodeCallGraph).filter(CodeCallGraph.caller_id.in_(unit_ids)).all()
+    
+    nodes = [
+        {
+            "id": u.id,
+            "name": u.name,
+            "type": u.unit_type,
+            "file": u.document.title if u.document else "unknown"
+        }
+        for u in units
+    ]
+    
+    edges = [
+        {
+            "source": c.caller_id,
+            "target": c.callee_id,
+            "target_name": c.callee_name,
+            "resolved": c.callee_id is not None
+        }
+        for c in calls
+    ]
+    
+    return {"nodes": nodes, "edges": edges}
