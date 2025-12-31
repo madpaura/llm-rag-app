@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Loader2, ExternalLink, FileText, Settings2 } from 'lucide-react';
+import { Send, Loader2, ExternalLink, FileText, Settings2, Eye } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { tomorrow } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { api, ChatSession, ChatMessage, RAGTechnique } from '../services/api';
+import { api, ChatSession, ChatMessage, RAGTechnique, CitationSource } from '../services/api';
+import { DocumentViewer } from './DocumentViewer';
 
 const RAG_TECHNIQUES: { value: RAGTechnique; label: string; description: string }[] = [
   { value: 'standard', label: 'Standard', description: 'Basic retrieval-augmented generation' },
@@ -24,6 +25,12 @@ export function ChatInterface({ session, workspaceId }: ChatInterfaceProps) {
   const [error, setError] = useState('');
   const [selectedTechnique, setSelectedTechnique] = useState<RAGTechnique>('standard');
   const [showTechniqueSelector, setShowTechniqueSelector] = useState(false);
+  const [viewingDocument, setViewingDocument] = useState<{
+    documentId: number;
+    chunkId?: number;
+    startLine?: number;
+    endLine?: number;
+  } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -139,16 +146,50 @@ export function ChatInterface({ session, workspaceId }: ChatInterfaceProps) {
             <div className="mt-4 pt-3 border-t border-gray-100">
               <p className="text-xs font-medium text-gray-600 mb-2">Sources:</p>
               <div className="space-y-1">
-                {message.metadata.sources.map((source: any, index: number) => (
-                  <div key={index} className="flex items-center space-x-2 text-xs">
+                {message.metadata.sources.map((source: CitationSource, index: number) => (
+                  <div key={index} className="flex items-center space-x-2 text-xs group">
                     <FileText className="h-3 w-3 text-gray-400" />
-                    <span className="text-gray-600">{source.title}</span>
+                    <span className="text-gray-600 font-medium">{source.title}</span>
+                    
+                    {/* Line numbers */}
+                    {source.start_line && source.end_line && (
+                      <span className="text-gray-400">
+                        (L{source.start_line}-{source.end_line})
+                      </span>
+                    )}
+                    
+                    {/* Page number for PDFs */}
+                    {source.page_number && (
+                      <span className="text-gray-400">
+                        (Page {source.page_number})
+                      </span>
+                    )}
+                    
+                    {/* View document button */}
+                    {source.document_id && (
+                      <button
+                        onClick={() => setViewingDocument({
+                          documentId: source.document_id!,
+                          chunkId: source.chunk_id,
+                          startLine: source.start_line,
+                          endLine: source.end_line
+                        })}
+                        className="flex items-center space-x-1 text-primary-600 hover:text-primary-700 opacity-0 group-hover:opacity-100 transition-opacity"
+                        title="View source document"
+                      >
+                        <Eye className="h-3 w-3" />
+                        <span>View</span>
+                      </button>
+                    )}
+                    
+                    {/* External links */}
                     {source.repo_url && (
                       <a
                         href={source.repo_url}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-primary-600 hover:text-primary-500"
+                        title="Open repository"
                       >
                         <ExternalLink className="h-3 w-3" />
                       </a>
@@ -159,10 +200,12 @@ export function ChatInterface({ session, workspaceId }: ChatInterfaceProps) {
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-primary-600 hover:text-primary-500"
+                        title="Open page"
                       >
                         <ExternalLink className="h-3 w-3" />
                       </a>
                     )}
+                    
                     <span className="text-gray-400">({source.score?.toFixed(2)})</span>
                   </div>
                 ))}
@@ -302,6 +345,17 @@ export function ChatInterface({ session, workspaceId }: ChatInterfaceProps) {
           </div>
         </form>
       </div>
+
+      {/* Document Viewer Modal */}
+      {viewingDocument && (
+        <DocumentViewer
+          documentId={viewingDocument.documentId}
+          chunkId={viewingDocument.chunkId}
+          startLine={viewingDocument.startLine}
+          endLine={viewingDocument.endLine}
+          onClose={() => setViewingDocument(null)}
+        />
+      )}
     </div>
   );
 }

@@ -36,16 +36,34 @@ logger = structlog.get_logger()
 settings = get_settings()
 
 class TextChunker:
-    """Service for chunking text into smaller pieces."""
+    """Service for chunking text into smaller pieces with line tracking."""
     
     def __init__(self, chunk_size: int = None, chunk_overlap: int = None):
         self.chunk_size = chunk_size or settings.CHUNK_SIZE
         self.chunk_overlap = chunk_overlap or settings.CHUNK_OVERLAP
     
+    def _build_line_index(self, text: str) -> List[int]:
+        """Build an index mapping character positions to line numbers."""
+        line_starts = [0]
+        for i, char in enumerate(text):
+            if char == '\n':
+                line_starts.append(i + 1)
+        return line_starts
+    
+    def _char_to_line(self, char_pos: int, line_starts: List[int]) -> int:
+        """Convert character position to line number (1-indexed)."""
+        for i, start in enumerate(line_starts):
+            if char_pos < start:
+                return i  # 1-indexed
+        return len(line_starts)
+    
     def chunk_text(self, text: str, metadata: Dict[str, Any] = None) -> List[Dict[str, Any]]:
-        """Split text into overlapping chunks."""
+        """Split text into overlapping chunks with line number tracking."""
         if not text.strip():
             return []
+        
+        # Build line index for accurate line number tracking
+        line_starts = self._build_line_index(text)
         
         chunks = []
         start = 0
@@ -61,15 +79,21 @@ class TextChunker:
                 last_newline = chunk_text.rfind('\n')
                 break_point = max(last_period, last_newline)
                 
-                if break_point > start + self.chunk_size // 2:
+                if break_point > self.chunk_size // 2:
                     chunk_text = text[start:start + break_point + 1]
                     end = start + break_point + 1
+            
+            # Calculate line numbers for this chunk
+            start_line = self._char_to_line(start, line_starts)
+            end_line = self._char_to_line(min(end, len(text) - 1), line_starts)
             
             chunk_metadata = metadata.copy() if metadata else {}
             chunk_metadata.update({
                 'chunk_index': chunk_index,
                 'start_char': start,
-                'end_char': end
+                'end_char': end,
+                'start_line': start_line,
+                'end_line': end_line
             })
             
             chunks.append({
@@ -611,7 +635,7 @@ class IngestionOrchestrator:
                     content=doc_data['content'],
                     file_path=doc_data.get('file_path'),
                     file_type=doc_data.get('file_type'),
-                    metadata=doc_data.get('metadata', {})
+                    doc_metadata=doc_data.get('metadata', {})
                 )
                 db.add(document)
                 db.flush()  # Get the ID
@@ -624,7 +648,7 @@ class IngestionOrchestrator:
                         document_id=document.id,
                         chunk_index=chunk_data['metadata']['chunk_index'],
                         content=chunk_data['content'],
-                        metadata=chunk_data['metadata']
+                        chunk_metadata=chunk_data['metadata']
                     )
                     db.add(chunk)
                     db.flush()

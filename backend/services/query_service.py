@@ -500,26 +500,32 @@ Alternative questions:"""
         return "\n---\n".join(context_parts)
     
     def _prepare_sources(self, retrieved_docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Prepare source citations from retrieved documents."""
+        """Prepare source citations from retrieved documents with navigation info."""
         sources = []
         
         for i, doc in enumerate(retrieved_docs):
+            metadata = doc.get('metadata', {})
+            
             source = {
                 "id": i + 1,
                 "title": doc.get('title', 'Unknown'),
                 "source": doc.get('source', ''),
                 "score": round(doc.get('score', 0.0), 3),
-                "content_preview": doc.get('content', '')[:200] + "..." if len(doc.get('content', '')) > 200 else doc.get('content', '')
+                "content_preview": doc.get('content', '')[:200] + "..." if len(doc.get('content', '')) > 200 else doc.get('content', ''),
+                # Citation navigation fields
+                "document_id": doc.get('document_id') or metadata.get('document_id'),
+                "chunk_id": doc.get('chunk_id') or metadata.get('chunk_id'),
+                "start_line": doc.get('start_line') or metadata.get('start_line'),
+                "end_line": doc.get('end_line') or metadata.get('end_line'),
+                "page_number": metadata.get('page_number'),
+                "file_path": doc.get('source') or metadata.get('file_path', '')
             }
             
-            # Add metadata if available
-            metadata = doc.get('metadata', {})
+            # Add additional metadata if available
             if 'repo_url' in metadata:
                 source['repo_url'] = metadata['repo_url']
             if 'page_url' in metadata:
                 source['page_url'] = metadata['page_url']
-            if 'file_path' in metadata:
-                source['file_path'] = metadata['file_path']
             
             sources.append(source)
         

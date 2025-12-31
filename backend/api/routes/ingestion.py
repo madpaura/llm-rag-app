@@ -11,7 +11,7 @@ import aiofiles
 import os
 from pathlib import Path
 
-from core.database import get_db, DataSource, Workspace
+from core.database import get_db, DataSource, Workspace, Document, DocumentChunk
 from core.config import get_settings
 from services.ingestion_service import IngestionOrchestrator
 
@@ -304,3 +304,103 @@ async def delete_data_source(
     db.commit()
     
     return {"message": "Data source deleted successfully"}
+
+
+@router.get("/documents/{document_id}")
+async def get_document(
+    document_id: int,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Get a document with its content for viewing."""
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found"
+        )
+    
+    # Get document content split into lines for navigation
+    content = document.content or ""
+    lines = content.split('\n')
+    
+    return {
+        "id": document.id,
+        "title": document.title,
+        "file_path": document.file_path,
+        "file_type": document.file_type,
+        "content": content,
+        "lines": lines,
+        "total_lines": len(lines),
+        "metadata": document.doc_metadata,
+        "created_at": document.created_at.isoformat()
+    }
+
+
+@router.get("/documents/{document_id}/chunk/{chunk_id}")
+async def get_document_chunk(
+    document_id: int,
+    chunk_id: int,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Get a specific chunk with its location in the document."""
+    chunk = db.query(DocumentChunk).filter(
+        DocumentChunk.id == chunk_id,
+        DocumentChunk.document_id == document_id
+    ).first()
+    
+    if not chunk:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chunk not found"
+        )
+    
+    document = db.query(Document).filter(Document.id == document_id).first()
+    
+    # Get chunk metadata for navigation
+    chunk_meta = chunk.chunk_metadata or {}
+    
+    return {
+        "chunk_id": chunk.id,
+        "document_id": document_id,
+        "document_title": document.title if document else "Unknown",
+        "file_path": document.file_path if document else None,
+        "chunk_index": chunk.chunk_index,
+        "content": chunk.content,
+        "start_line": chunk_meta.get('start_line', 1),
+        "end_line": chunk_meta.get('end_line', 1),
+        "start_char": chunk_meta.get('start_char', 0),
+        "end_char": chunk_meta.get('end_char', 0),
+        "page_number": chunk_meta.get('page_number'),
+        "metadata": chunk_meta
+    }
+
+
+@router.get("/documents/by-workspace/{workspace_id}")
+async def get_workspace_documents(
+    workspace_id: int,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Get all documents for a workspace."""
+    # Get all data sources for the workspace
+    data_sources = db.query(DataSource).filter(DataSource.workspace_id == workspace_id).all()
+    data_source_ids = [ds.id for ds in data_sources]
+    
+    if not data_source_ids:
+        return []
+    
+    # Get all documents for these data sources
+    documents = db.query(Document).filter(Document.data_source_id.in_(data_source_ids)).all()
+    
+    return [
+        {
+            "id": doc.id,
+            "title": doc.title,
+            "file_path": doc.file_path,
+            "file_type": doc.file_type,
+            "created_at": doc.created_at.isoformat()
+        }
+        for doc in documents
+    ]
