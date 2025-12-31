@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
-import { MessageSquare, Upload, Database, Plus, Send, Loader2, Trash2 } from 'lucide-react';
+import { MessageSquare, Upload, Database, Plus, Send, Loader2, Trash2, Search, X } from 'lucide-react';
 import { api, Workspace, ChatSession, DataSource } from '../services/api';
 import { ChatInterface } from '../components/ChatInterface';
 
@@ -14,6 +14,9 @@ export function WorkspaceView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [isDeleting, setIsDeleting] = useState(false);
+  const [dataSourceSearch, setDataSourceSearch] = useState('');
+  const [deletingSessionId, setDeletingSessionId] = useState<number | null>(null);
+  const [deletingDataSourceId, setDeletingDataSourceId] = useState<number | null>(null);
 
   useEffect(() => {
     if (workspaceId) {
@@ -82,6 +85,55 @@ export function WorkspaceView() {
     }
   };
 
+  const handleDeleteChatSession = async (sessionId: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    
+    const confirmed = window.confirm('Are you sure you want to delete this chat session? All messages will be lost.');
+    if (!confirmed) return;
+
+    try {
+      setDeletingSessionId(sessionId);
+      await api.deleteChatSession(sessionId);
+      setChatSessions(chatSessions.filter(s => s.id !== sessionId));
+      if (activeChatSession?.id === sessionId) {
+        setActiveChatSession(chatSessions.find(s => s.id !== sessionId) || null);
+      }
+    } catch (err) {
+      alert('Failed to delete chat session');
+      console.error('Error deleting chat session:', err);
+    } finally {
+      setDeletingSessionId(null);
+    }
+  };
+
+  const handleDeleteDataSource = async (dataSourceId: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    
+    const confirmed = window.confirm('Are you sure you want to delete this data source? All associated documents will be removed.');
+    if (!confirmed) return;
+
+    try {
+      setDeletingDataSourceId(dataSourceId);
+      await api.deleteDataSource(dataSourceId);
+      setDataSources(dataSources.filter(ds => ds.id !== dataSourceId));
+    } catch (err) {
+      alert('Failed to delete data source');
+      console.error('Error deleting data source:', err);
+    } finally {
+      setDeletingDataSourceId(null);
+    }
+  };
+
+  // Filter data sources based on search
+  const filteredDataSources = useMemo(() => {
+    if (!dataSourceSearch.trim()) return dataSources;
+    const search = dataSourceSearch.toLowerCase();
+    return dataSources.filter(ds => 
+      ds.name.toLowerCase().includes(search) ||
+      ds.source_type.toLowerCase().includes(search)
+    );
+  }, [dataSources, dataSourceSearch]);
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -145,6 +197,28 @@ export function WorkspaceView() {
             </Link>
           </div>
           
+          {/* Search box for data sources */}
+          {dataSources.length > 3 && (
+            <div className="relative mb-3">
+              <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-3 w-3 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Search sources..."
+                value={dataSourceSearch}
+                onChange={(e) => setDataSourceSearch(e.target.value)}
+                className="w-full pl-7 pr-7 py-1.5 text-xs border border-gray-200 rounded focus:ring-1 focus:ring-primary-500 focus:border-primary-500"
+              />
+              {dataSourceSearch && (
+                <button
+                  onClick={() => setDataSourceSearch('')}
+                  className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+          )}
+          
           {dataSources.length === 0 ? (
             <div className="text-center py-4">
               <Database className="mx-auto h-8 w-8 text-gray-400" />
@@ -156,11 +230,13 @@ export function WorkspaceView() {
                 Add your first source
               </Link>
             </div>
+          ) : filteredDataSources.length === 0 ? (
+            <p className="text-xs text-gray-500 text-center py-2">No matching sources</p>
           ) : (
-            <div className="space-y-2">
-              {dataSources.slice(0, 5).map((source) => (
-                <div key={source.id} className="flex items-center space-x-2 p-2 bg-gray-50 rounded">
-                  <div className={`w-2 h-2 rounded-full ${
+            <div className="space-y-2 max-h-48 overflow-y-auto">
+              {filteredDataSources.map((source) => (
+                <div key={source.id} className="flex items-center space-x-2 p-2 bg-gray-50 rounded group">
+                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
                     source.status === 'completed' ? 'bg-green-500' :
                     source.status === 'processing' ? 'bg-yellow-500' :
                     source.status === 'failed' ? 'bg-red-500' : 'bg-gray-400'
@@ -169,13 +245,20 @@ export function WorkspaceView() {
                     <p className="text-xs font-medium text-gray-900 truncate">{source.name}</p>
                     <p className="text-xs text-gray-500 capitalize">{source.source_type}</p>
                   </div>
+                  <button
+                    onClick={(e) => handleDeleteDataSource(source.id, e)}
+                    disabled={deletingDataSourceId === source.id}
+                    className="p-1 text-gray-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-opacity disabled:opacity-50"
+                    title="Delete data source"
+                  >
+                    {deletingDataSourceId === source.id ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <Trash2 className="h-3 w-3" />
+                    )}
+                  </button>
                 </div>
               ))}
-              {dataSources.length > 5 && (
-                <p className="text-xs text-gray-500 text-center">
-                  +{dataSources.length - 5} more sources
-                </p>
-              )}
             </div>
           )}
         </div>
@@ -207,20 +290,34 @@ export function WorkspaceView() {
           ) : (
             <div className="space-y-1 max-h-96 overflow-y-auto scrollbar-thin">
               {chatSessions.map((session) => (
-                <button
+                <div
                   key={session.id}
                   onClick={() => setActiveChatSession(session)}
-                  className={`w-full text-left p-3 rounded-lg text-sm transition-colors ${
+                  className={`w-full text-left p-3 rounded-lg text-sm transition-colors cursor-pointer group flex items-start justify-between ${
                     activeChatSession?.id === session.id
                       ? 'bg-primary-100 text-primary-700'
                       : 'hover:bg-gray-50 text-gray-700'
                   }`}
                 >
-                  <p className="font-medium truncate">{session.title}</p>
-                  <p className="text-xs text-gray-500 mt-1">
-                    {new Date(session.updated_at).toLocaleDateString()}
-                  </p>
-                </button>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium truncate">{session.title}</p>
+                    <p className="text-xs text-gray-500 mt-1">
+                      {new Date(session.updated_at).toLocaleDateString()}
+                    </p>
+                  </div>
+                  <button
+                    onClick={(e) => handleDeleteChatSession(session.id, e)}
+                    disabled={deletingSessionId === session.id}
+                    className="p-1 text-gray-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-opacity disabled:opacity-50 ml-2"
+                    title="Delete chat session"
+                  >
+                    {deletingSessionId === session.id ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <Trash2 className="h-3 w-3" />
+                    )}
+                  </button>
+                </div>
               ))}
             </div>
           )}

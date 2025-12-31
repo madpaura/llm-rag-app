@@ -312,6 +312,11 @@ export const api = {
     return response.data;
   },
 
+  async deleteChatSession(sessionId: number): Promise<{ success: boolean; message: string }> {
+    const response = await apiClient.delete(`/api/query/chat/sessions/${sessionId}`);
+    return response.data;
+  },
+
   // Health checks
   async healthCheck(): Promise<{ status: string; service: string; version: string }> {
     const response = await apiClient.get('/health/');

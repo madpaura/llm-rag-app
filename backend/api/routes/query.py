@@ -9,7 +9,7 @@ from typing import List, Optional, Dict, Any
 import structlog
 import json
 
-from core.database import get_db, ChatSession, Workspace
+from core.database import get_db, ChatSession, ChatMessage, Workspace
 from services.query_service import RAGQueryService, ChatService
 
 logger = structlog.get_logger()
@@ -269,6 +269,50 @@ async def get_chat_history(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
         )
+
+@router.delete("/chat/sessions/{session_id}")
+async def delete_chat_session(
+    session_id: int,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Delete a chat session and all its messages."""
+    try:
+        # TODO: Get user from token and verify access
+        user_id = 1  # Mock user ID
+        
+        session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Chat session not found"
+            )
+        
+        if session.user_id != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to chat session"
+            )
+        
+        # Delete all messages in the session
+        db.query(ChatMessage).filter(ChatMessage.session_id == session_id).delete()
+        
+        # Delete the session
+        db.delete(session)
+        db.commit()
+        
+        return {"success": True, "message": "Chat session deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deleting chat session: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
 
 # WebSocket endpoint for real-time chat
 @router.websocket("/chat/ws/{session_id}")
