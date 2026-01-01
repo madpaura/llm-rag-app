@@ -85,6 +85,22 @@ class Settings(BaseSettings):
     MAX_CONCURRENT_INGESTIONS: int = 5
     QUERY_TIMEOUT: int = 30
     
+    # Caching
+    EMBEDDING_CACHE_SIZE: int = 5000
+    EMBEDDING_CACHE_TTL: int = 7200  # 2 hours
+    QUERY_CACHE_SIZE: int = 500
+    QUERY_CACHE_TTL: int = 1800  # 30 minutes
+    
+    # Batch Processing
+    EMBEDDING_BATCH_SIZE: int = 32
+    INGESTION_BATCH_SIZE: int = 50
+    MAX_PARALLEL_EMBEDDINGS: int = 4
+    
+    # Backup
+    BACKUP_DIR: str = "./data/backups"
+    BACKUP_RETENTION_COUNT: int = 5
+    AUTO_BACKUP_ENABLED: bool = False
+    
     class Config:
         env_file = ".env"
         case_sensitive = True

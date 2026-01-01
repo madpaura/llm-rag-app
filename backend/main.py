@@ -9,10 +9,11 @@ from fastapi.responses import HTMLResponse
 import structlog
 from contextlib import asynccontextmanager
 
-from api.routes import auth, workspaces, ingestion, query, health, rag
+from api.routes import auth, workspaces, ingestion, query, health, rag, admin
 from core.config import get_settings
 from core.database import init_db
 from core.logging import setup_logging
+from core.cache import cleanup_caches
 
 # Setup structured logging
 setup_logging()
@@ -22,16 +23,28 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan manager."""
+    """Application lifespan manager with optimized startup."""
+    import time
+    start_time = time.time()
+    
     logger.info("Starting RAG application...")
     
-    # Initialize database
+    # Initialize database (fast - just creates tables if needed)
     await init_db()
     logger.info("Database initialized")
     
+    # Note: Heavy services (vector store, embeddings) are lazy-loaded
+    # They will be initialized on first use, not at startup
+    
+    startup_time = time.time() - start_time
+    logger.info(f"Application started in {startup_time:.2f}s (services lazy-loaded)")
+    
     yield
     
+    # Cleanup on shutdown
     logger.info("Shutting down RAG application...")
+    await cleanup_caches()
+    logger.info("Caches cleaned up")
 
 # API root path configuration (for nginx proxy)
 # When behind nginx at /rag/api, the root_path tells Swagger UI the correct base URL
@@ -366,6 +379,7 @@ app.include_router(workspaces.router, prefix="/api/workspaces", tags=["workspace
 app.include_router(ingestion.router, prefix="/api/ingestion", tags=["ingestion"])
 app.include_router(query.router, prefix="/api/query", tags=["query"])
 app.include_router(rag.router, prefix="/api/rag", tags=["rag-engine"])
+app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
 
 @app.get("/")
 async def root():
