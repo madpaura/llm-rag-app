@@ -1,6 +1,30 @@
 import axios from 'axios';
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+// API URL configuration
+// When behind nginx at /rag/api, use relative path
+// Otherwise use the environment variable or default to localhost:8000
+const getApiBaseUrl = () => {
+  // If REACT_APP_API_URL is set, use it
+  if (process.env.REACT_APP_API_URL) {
+    return process.env.REACT_APP_API_URL;
+  }
+  
+  // Check if we're running under /rag/ui path (nginx proxy on port 8080)
+  // Also check the port to detect nginx proxy
+  const isNginxProxy = window.location.pathname.startsWith('/rag/ui') || 
+                       window.location.port === '8080';
+  
+  if (isNginxProxy) {
+    // Use relative path for nginx proxy - requests go to same origin
+    return '/rag/api';
+  }
+  
+  // Default for local development (React dev server on port 3000)
+  return 'http://localhost:8000';
+};
+
+const API_BASE_URL = getApiBaseUrl();
+console.log('[API] Base URL:', API_BASE_URL, 'Path:', window.location.pathname, 'Port:', window.location.port);
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
@@ -24,7 +48,9 @@ apiClient.interceptors.response.use(
   (error) => {
     if (error.response?.status === 401) {
       localStorage.removeItem('auth_token');
-      window.location.href = '/login';
+      // Use PUBLIC_URL for correct redirect path when hosted under subpath
+      const basePath = process.env.PUBLIC_URL || '';
+      window.location.href = `${basePath}/login`;
     }
     return Promise.reject(error);
   }
@@ -206,7 +232,7 @@ export const api = {
 
   // Workspaces
   async getWorkspaces(): Promise<Workspace[]> {
-    const response = await apiClient.get('/api/workspaces');
+    const response = await apiClient.get('/api/workspaces/');
     return response.data;
   },
 

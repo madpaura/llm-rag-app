@@ -31,6 +31,11 @@ async def lifespan(app: FastAPI):
     
     logger.info("Shutting down RAG application...")
 
+# API root path configuration (for nginx proxy)
+# When behind nginx at /rag/api, set ROOT_PATH=/rag/api
+import os
+ROOT_PATH = os.environ.get("ROOT_PATH", "")
+
 # Create FastAPI app
 app = FastAPI(
     title="Organization RAG API",
@@ -50,6 +55,7 @@ This API provides Retrieval-Augmented Generation capabilities for developer onbo
 All endpoints (except health checks) require Bearer token authentication.
     """,
     version="1.0.0",
+    root_path=ROOT_PATH,
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",

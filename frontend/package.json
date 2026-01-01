@@ -2,6 +2,7 @@
   "name": "rag-frontend",
   "version": "1.0.0",
   "private": true,
+  "homepage": "/rag/ui",
   "dependencies": {
     "@types/node": "^16.18.0",
     "@types/react": "^18.2.0",
