@@ -6,6 +6,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { tomorrow } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { api, ChatSession, ChatMessage, RAGTechnique, CitationSource } from '../services/api';
 import { DocumentViewer } from './DocumentViewer';
+import { MermaidDiagram } from './MermaidDiagram';
 
 const RAG_TECHNIQUES: { value: RAGTechnique; label: string; description: string }[] = [
   { value: 'standard', label: 'Standard', description: 'Basic retrieval-augmented generation' },
@@ -122,6 +123,12 @@ export function ChatInterface({ session, workspaceId }: ChatInterfaceProps) {
                 code({ className, children, ...props }: any) {
                   const match = /language-(\w+)/.exec(className || '');
                   const isInline = !match;
+                  const codeContent = String(children).replace(/\n$/, '');
+                  
+                  // Check if this is a mermaid diagram
+                  if (match && match[1] === 'mermaid') {
+                    return <MermaidDiagram chart={codeContent} />;
+                  }
                   
                   return !isInline ? (
                     <SyntaxHighlighter
@@ -129,7 +136,7 @@ export function ChatInterface({ session, workspaceId }: ChatInterfaceProps) {
                       language={match[1]}
                       PreTag="div"
                     >
-                      {String(children).replace(/\n$/, '')}
+                      {codeContent}
                     </SyntaxHighlighter>
                   ) : (
                     <code className={className} {...props}>
