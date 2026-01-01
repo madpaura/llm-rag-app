@@ -1,5 +1,6 @@
 """
 Vector database service for embeddings and similarity search.
+Optimized for multi-user scenarios with caching and batch processing.
 """
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
@@ -7,13 +8,18 @@ import faiss
 import pickle
 import os
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import structlog
 from abc import ABC, abstractmethod
 
 from core.config import get_settings
+from core.cache import get_embedding_cache, EmbeddingCache
 
 logger = structlog.get_logger()
 settings = get_settings()
+
+# Thread pool for CPU-bound operations
+_executor = ThreadPoolExecutor(max_workers=settings.MAX_PARALLEL_EMBEDDINGS)
 
 class VectorStore(ABC):
     """Abstract base class for vector stores."""
@@ -177,14 +183,17 @@ class FAISSVectorStore(VectorStore):
 class EmbeddingService:
     """
     Service for generating embeddings.
-    Supports multiple providers: ollama, openai, sentence_transformers
+    Supports multiple providers: ollama, openai, sentence_transformers.
+    Optimized with caching and batch processing.
     """
     
-    def __init__(self, provider: Optional[str] = None):
+    def __init__(self, provider: Optional[str] = None, use_cache: bool = True):
         self.provider = provider or settings.EMBEDDING_PROVIDER
         self.model = None
         self.ollama_embeddings = None
         self._dimension = 384  # Default dimension
+        self._use_cache = use_cache
+        self._cache: Optional[EmbeddingCache] = get_embedding_cache() if use_cache else None
         self._load_model()
     
     def _load_model(self):
@@ -225,34 +234,92 @@ class EmbeddingService:
         return self._dimension
     
     async def encode(self, texts: List[str]) -> List[np.ndarray]:
-        """Generate embeddings for texts."""
+        """Generate embeddings for texts with caching support."""
         try:
-            if self.provider in ["ollama", "openai"]:
-                # Use LangChain embeddings
-                embeddings = await asyncio.to_thread(
-                    self.ollama_embeddings.embed_documents, texts
-                )
-                return [np.array(emb, dtype=np.float32) for emb in embeddings]
+            if not texts:
+                return []
+            
+            # Check cache for existing embeddings
+            if self._use_cache and self._cache:
+                cached, cached_indices, uncached = self._cache.get_batch_embeddings(texts)
+                
+                if not uncached:
+                    # All embeddings were cached
+                    logger.debug(f"All {len(texts)} embeddings found in cache")
+                    return [np.array(emb, dtype=np.float32) for emb in cached]
+                
+                # Only generate embeddings for uncached texts
+                uncached_texts = [t[1] for t in uncached]
+                uncached_indices = [t[0] for t in uncached]
+                
+                logger.debug(f"Cache hit: {len(cached)}/{len(texts)}, generating {len(uncached_texts)} new embeddings")
             else:
-                # Use SentenceTransformer
-                embeddings = self.model.encode(texts, convert_to_numpy=True)
-                return [emb.astype(np.float32) for emb in embeddings]
+                uncached_texts = texts
+                uncached_indices = list(range(len(texts)))
+                cached = []
+                cached_indices = []
+            
+            # Generate embeddings for uncached texts
+            if self.provider in ["ollama", "openai"]:
+                # Process in batches for better performance
+                batch_size = settings.EMBEDDING_BATCH_SIZE
+                new_embeddings = []
+                
+                for i in range(0, len(uncached_texts), batch_size):
+                    batch = uncached_texts[i:i + batch_size]
+                    batch_embeddings = await asyncio.to_thread(
+                        self.ollama_embeddings.embed_documents, batch
+                    )
+                    new_embeddings.extend(batch_embeddings)
+            else:
+                # Use SentenceTransformer with batching
+                new_embeddings = self.model.encode(
+                    uncached_texts, 
+                    convert_to_numpy=True,
+                    batch_size=settings.EMBEDDING_BATCH_SIZE
+                ).tolist()
+            
+            # Cache new embeddings
+            if self._use_cache and self._cache:
+                self._cache.set_batch_embeddings(uncached_texts, new_embeddings)
+            
+            # Merge cached and new embeddings in correct order
+            result = [None] * len(texts)
+            for idx, emb in zip(cached_indices, cached):
+                result[idx] = np.array(emb, dtype=np.float32)
+            for idx, emb in zip(uncached_indices, new_embeddings):
+                result[idx] = np.array(emb, dtype=np.float32)
+            
+            return result
                 
         except Exception as e:
             logger.error(f"Error generating embeddings: {e}")
             return []
     
     async def encode_single(self, text: str) -> np.ndarray:
-        """Generate embedding for a single text."""
+        """Generate embedding for a single text with caching."""
         try:
+            # Check cache first
+            if self._use_cache and self._cache:
+                cached = self._cache.get_embedding(text)
+                if cached is not None:
+                    return np.array(cached, dtype=np.float32)
+            
+            # Generate embedding
             if self.provider in ["ollama", "openai"]:
                 embedding = await asyncio.to_thread(
                     self.ollama_embeddings.embed_query, text
                 )
-                return np.array(embedding, dtype=np.float32)
+                embedding_list = embedding
             else:
                 embedding = self.model.encode([text], convert_to_numpy=True)
-                return embedding[0].astype(np.float32)
+                embedding_list = embedding[0].tolist()
+            
+            # Cache the result
+            if self._use_cache and self._cache:
+                self._cache.set_embedding(text, embedding_list)
+            
+            return np.array(embedding_list, dtype=np.float32)
                 
         except Exception as e:
             logger.error(f"Error generating single embedding: {e}")
