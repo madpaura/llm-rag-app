@@ -133,9 +133,17 @@ class GitIngestionService:
         workspace_id: int, 
         branch: str = "main",
         language_filter: Optional[str] = None,
-        max_depth: Optional[int] = None
+        max_depth: Optional[int] = None,
+        username: Optional[str] = None,
+        token: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Clone and ingest a Git repository."""
+        """Clone and ingest a Git repository.
+        
+        Supports multiple authentication methods:
+        - No auth: Public repositories
+        - Bearer token: For Bitbucket Server with Basic Auth disabled
+        - Basic auth: username:token in URL (for GitHub, GitLab, etc.)
+        """
         try:
             logger.info(f"Starting Git ingestion for {repo_url} (language={language_filter}, max_depth={max_depth})")
             
@@ -151,9 +159,37 @@ class GitIngestionService:
                 repo_path = Path(temp_dir) / "repo"
                 base_depth = len(repo_path.parts)
                 
-                # Clone repository
+                # Clone repository with authentication
                 try:
-                    repo = Repo.clone_from(repo_url, repo_path, branch=branch, depth=1)
+                    import subprocess
+                    
+                    if token:
+                        # Use Bearer token authentication (for Bitbucket Server with Basic Auth disabled)
+                        # Use subprocess directly since GitPython blocks -c option
+                        logger.info(f"Using Bearer token authentication for {repo_url}")
+                        cmd = [
+                            'git', '-c', f'http.extraHeader=Authorization: Bearer {token}',
+                            'clone', '-v', f'--branch={branch}', '--depth=1',
+                            '--', repo_url, str(repo_path)
+                        ]
+                        result = subprocess.run(cmd, capture_output=True, text=True)
+                        if result.returncode != 0:
+                            raise GitCommandError(cmd, result.returncode, result.stderr)
+                        repo = Repo(repo_path)
+                    elif username and token:
+                        # Fallback: embed credentials in URL (for GitHub, GitLab, etc.)
+                        # URL-encode the token in case it contains special characters
+                        from urllib.parse import quote
+                        encoded_token = quote(token, safe='')
+                        if '://' in repo_url:
+                            protocol, rest = repo_url.split('://', 1)
+                            repo_url = f"{protocol}://{username}:{encoded_token}@{rest}"
+                            logger.info(f"Using Basic auth (URL-embedded) for repository")
+                        repo = Repo.clone_from(repo_url, repo_path, branch=branch, depth=1)
+                    else:
+                        # No authentication - public repository
+                        repo = Repo.clone_from(repo_url, repo_path, branch=branch, depth=1)
+                    
                     logger.info(f"Cloned repository to {repo_path}")
                 except GitCommandError as e:
                     logger.error(f"Failed to clone repository: {e}")
@@ -626,7 +662,9 @@ class IngestionOrchestrator:
                     data_source.workspace_id,
                     branch=config.get('branch', 'main'),
                     language_filter=config.get('language_filter'),
-                    max_depth=config.get('max_depth')
+                    max_depth=config.get('max_depth'),
+                    username=config.get('username'),
+                    token=config.get('token')
                 )
             elif data_source.source_type == "confluence":
                 config = data_source.config or {}
