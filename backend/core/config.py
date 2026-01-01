@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     OLLAMA_EMBEDDING_MODEL: str = "nomic-embed-text"
     OLLAMA_TIMEOUT: int = 120
     
+    # Groq Configuration
+    GROQ_API_KEY: Optional[str] = None
+    GROQ_URL: str = "https://api.groq.com/openai/v1"
+    
     # Embedding Configuration
     EMBEDDING_PROVIDER: str = "ollama"  # ollama, openai, sentence_transformers
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"

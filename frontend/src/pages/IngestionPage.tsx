@@ -1,7 +1,21 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, GitBranch, Globe, Upload, Loader2, CheckCircle, XCircle, Clock, Code, FileCode } from 'lucide-react';
 import { api, DataSource, Workspace, CodeIngestionStats } from '../services/api';
+
+// Progress tracking interface
+interface IngestionProgress {
+  data_source_id: number;
+  status: string;
+  in_progress: boolean;
+  stage: string;
+  stage_num: number;
+  total_stages: number;
+  current: number;
+  total: number;
+  percent: number;
+  message: string;
+}
 
 export function IngestionPage() {
   const { workspaceId } = useParams<{ workspaceId: string }>();
@@ -11,6 +25,11 @@ export function IngestionPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  
+  // Progress tracking state
+  const [ingestionProgress, setIngestionProgress] = useState<IngestionProgress | null>(null);
+  const [activeDataSourceId, setActiveDataSourceId] = useState<number | null>(null);
+  const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // Git form state
   const [gitForm, setGitForm] = useState({
@@ -18,8 +37,22 @@ export function IngestionPage() {
     repo_url: '',
     branch: 'main',
     username: '',
-    token: ''
+    token: '',
+    language_filter: 'all',
+    max_depth: '' as string | number
   });
+
+  // Language filter options
+  const LANGUAGE_OPTIONS = [
+    { value: 'all', label: 'All Languages', description: 'Python, JS, Java, C/C++, Go, Rust, Docs' },
+    { value: 'c_cpp', label: 'C/C++', description: '.c, .h, .cpp, .hpp, .cc, .cxx' },
+    { value: 'python', label: 'Python', description: '.py, .pyi, .pyx' },
+    { value: 'javascript', label: 'JavaScript/TypeScript', description: '.js, .jsx, .ts, .tsx' },
+    { value: 'java', label: 'Java', description: '.java' },
+    { value: 'go', label: 'Go', description: '.go' },
+    { value: 'rust', label: 'Rust', description: '.rs' },
+    { value: 'docs', label: 'Documentation Only', description: '.md, .txt, .rst' },
+  ];
 
   // Confluence form state
   const [confluenceForm, setConfluenceForm] = useState({
@@ -41,7 +74,9 @@ export function IngestionPage() {
   const [codeForm, setCodeForm] = useState({
     name: '',
     files: [] as File[],
-    directoryPath: ''
+    directoryPath: '',
+    maxDepth: '' as string | number,
+    includeHeaders: true
   });
   const [codeStats, setCodeStats] = useState<CodeIngestionStats | null>(null);
 
@@ -49,7 +84,52 @@ export function IngestionPage() {
     if (workspaceId) {
       loadWorkspaceData();
     }
+    
+    // Cleanup progress polling on unmount
+    return () => {
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+      }
+    };
   }, [workspaceId]);
+
+  // Start polling for progress
+  const startProgressPolling = (dataSourceId: number) => {
+    setActiveDataSourceId(dataSourceId);
+    
+    // Clear any existing interval
+    if (progressIntervalRef.current) {
+      clearInterval(progressIntervalRef.current);
+    }
+    
+    // Poll every 1 second
+    progressIntervalRef.current = setInterval(async () => {
+      try {
+        const progress = await api.getIngestionProgress(dataSourceId);
+        setIngestionProgress(progress);
+        
+        // Stop polling if no longer in progress
+        if (!progress.in_progress || progress.status === 'completed' || progress.status === 'failed') {
+          if (progressIntervalRef.current) {
+            clearInterval(progressIntervalRef.current);
+            progressIntervalRef.current = null;
+          }
+        }
+      } catch (err) {
+        console.error('Error fetching progress:', err);
+      }
+    }, 1000);
+  };
+
+  // Stop polling
+  const stopProgressPolling = () => {
+    if (progressIntervalRef.current) {
+      clearInterval(progressIntervalRef.current);
+      progressIntervalRef.current = null;
+    }
+    setActiveDataSourceId(null);
+    setIngestionProgress(null);
+  };
 
   const loadWorkspaceData = async () => {
     try {
@@ -72,24 +152,55 @@ export function IngestionPage() {
     setLoading(true);
     setError('');
     setSuccess('');
+    setIngestionProgress(null);
 
     try {
+      // Start the ingestion - this returns quickly with data_source_id
       const result = await api.ingestGitRepository({
         workspace_id: parseInt(workspaceId),
-        ...gitForm
+        name: gitForm.name,
+        repo_url: gitForm.repo_url,
+        branch: gitForm.branch,
+        username: gitForm.username || undefined,
+        token: gitForm.token || undefined,
+        language_filter: gitForm.language_filter,
+        max_depth: gitForm.max_depth ? parseInt(gitForm.max_depth.toString()) : undefined
       });
 
-      if (result.success) {
-        setSuccess(`Successfully ingested ${result.documents_count} documents from Git repository`);
-        setGitForm({ name: '', repo_url: '', branch: 'main', username: '', token: '' });
-        loadWorkspaceData();
-      } else {
-        setError(result.error || 'Failed to ingest Git repository');
+      if (result.data_source_id) {
+        // Start polling for progress
+        startProgressPolling(result.data_source_id);
+        
+        // Poll until completion
+        const checkCompletion = setInterval(async () => {
+          try {
+            const progress = await api.getIngestionProgress(result.data_source_id);
+            
+            if (!progress.in_progress || progress.status === 'completed' || progress.status === 'failed') {
+              clearInterval(checkCompletion);
+              stopProgressPolling();
+              setLoading(false);
+              
+              if (progress.status === 'completed') {
+                setSuccess('Successfully ingested repository');
+                setGitForm({ name: '', repo_url: '', branch: 'main', username: '', token: '', language_filter: 'all', max_depth: '' });
+                loadWorkspaceData();
+              } else if (progress.status === 'failed') {
+                setError('Ingestion failed. Check server logs for details.');
+              }
+            }
+          } catch (err) {
+            console.error('Error checking completion:', err);
+          }
+        }, 2000);
+      } else if (!result.success) {
+        setError(result.error || 'Failed to start Git repository ingestion');
+        setLoading(false);
       }
     } catch (err) {
       setError('Failed to ingest Git repository');
       console.error('Git ingestion error:', err);
-    } finally {
+      stopProgressPolling();
       setLoading(false);
     }
   };
@@ -185,7 +296,7 @@ export function IngestionPage() {
 
   const handleCodeSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!workspaceId || codeForm.files.length === 0) return;
+    if (!workspaceId || (codeForm.files.length === 0 && !codeForm.directoryPath)) return;
 
     setLoading(true);
     setError('');
@@ -193,16 +304,30 @@ export function IngestionPage() {
     setCodeStats(null);
 
     try {
-      const result = await api.ingestCodeFiles(
-        parseInt(workspaceId),
-        codeForm.name || 'Code Files',
-        codeForm.files
-      );
+      let result;
+      
+      if (codeForm.directoryPath) {
+        // Use directory ingestion
+        result = await api.ingestCodeDirectory(
+          parseInt(workspaceId),
+          codeForm.name || 'Code Directory',
+          codeForm.directoryPath,
+          codeForm.maxDepth ? parseInt(codeForm.maxDepth.toString()) : undefined,
+          codeForm.includeHeaders
+        );
+      } else {
+        // Use file upload ingestion
+        result = await api.ingestCodeFiles(
+          parseInt(workspaceId),
+          codeForm.name || 'Code Files',
+          codeForm.files
+        );
+      }
 
       if (result.success) {
         setCodeStats(result.stats);
         setSuccess(`Successfully processed ${result.stats.files_processed} files: ${result.stats.functions_extracted} functions, ${result.stats.classes_extracted} classes, ${result.stats.structs_extracted} structs`);
-        setCodeForm({ name: '', files: [], directoryPath: '' });
+        setCodeForm({ name: '', files: [], directoryPath: '', maxDepth: '', includeHeaders: true });
         loadWorkspaceData();
       } else {
         setError('Failed to ingest code files');
@@ -345,17 +470,50 @@ export function IngestionPage() {
                   />
                 </div>
 
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Branch
+                    </label>
+                    <input
+                      type="text"
+                      value={gitForm.branch}
+                      onChange={(e) => setGitForm({ ...gitForm, branch: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                      placeholder="main"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Max Depth (optional)
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      value={gitForm.max_depth}
+                      onChange={(e) => setGitForm({ ...gitForm, max_depth: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                      placeholder="Unlimited"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">Limit directory depth to scan</p>
+                  </div>
+                </div>
+
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Branch
+                    Language Filter
                   </label>
-                  <input
-                    type="text"
-                    value={gitForm.branch}
-                    onChange={(e) => setGitForm({ ...gitForm, branch: e.target.value })}
+                  <select
+                    value={gitForm.language_filter}
+                    onChange={(e) => setGitForm({ ...gitForm, language_filter: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
-                    placeholder="main"
-                  />
+                  >
+                    {LANGUAGE_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label} - {opt.description}
+                      </option>
+                    ))}
+                  </select>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -383,6 +541,78 @@ export function IngestionPage() {
                   </div>
                 </div>
 
+                {/* Progress Bar */}
+                {loading && (
+                  <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-sm font-medium text-blue-800">
+                        {ingestionProgress?.stage || 'Starting...'}
+                      </span>
+                      <span className="text-sm text-blue-600">
+                        Stage {ingestionProgress?.stage_num || 1}/{ingestionProgress?.total_stages || 4}
+                      </span>
+                    </div>
+                    
+                    {/* Stage Progress Bar */}
+                    <div className="w-full bg-blue-200 rounded-full h-2 mb-2">
+                      <div
+                        className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                        style={{ 
+                          width: `${((ingestionProgress?.stage_num || 1) / (ingestionProgress?.total_stages || 4)) * 100}%` 
+                        }}
+                      />
+                    </div>
+                    
+                    {/* Item Progress (if available) */}
+                    {ingestionProgress && ingestionProgress.total > 0 && (
+                      <div className="mt-3">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs text-blue-700">
+                            {ingestionProgress.message}
+                          </span>
+                          <span className="text-xs text-blue-600">
+                            {ingestionProgress.current}/{ingestionProgress.total}
+                          </span>
+                        </div>
+                        <div className="w-full bg-blue-100 rounded-full h-1.5">
+                          <div
+                            className="bg-blue-500 h-1.5 rounded-full transition-all duration-300"
+                            style={{ width: `${ingestionProgress.percent}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* Stage Indicators */}
+                    <div className="flex justify-between mt-4 text-xs">
+                      <div className={`flex flex-col items-center ${(ingestionProgress?.stage_num || 0) >= 1 ? 'text-blue-600' : 'text-gray-400'}`}>
+                        <div className={`w-6 h-6 rounded-full flex items-center justify-center mb-1 ${(ingestionProgress?.stage_num || 0) >= 1 ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}>
+                          {(ingestionProgress?.stage_num || 0) > 1 ? <CheckCircle className="w-4 h-4" /> : '1'}
+                        </div>
+                        <span>Clone</span>
+                      </div>
+                      <div className={`flex flex-col items-center ${(ingestionProgress?.stage_num || 0) >= 2 ? 'text-blue-600' : 'text-gray-400'}`}>
+                        <div className={`w-6 h-6 rounded-full flex items-center justify-center mb-1 ${(ingestionProgress?.stage_num || 0) >= 2 ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}>
+                          {(ingestionProgress?.stage_num || 0) > 2 ? <CheckCircle className="w-4 h-4" /> : '2'}
+                        </div>
+                        <span>Process</span>
+                      </div>
+                      <div className={`flex flex-col items-center ${(ingestionProgress?.stage_num || 0) >= 3 ? 'text-blue-600' : 'text-gray-400'}`}>
+                        <div className={`w-6 h-6 rounded-full flex items-center justify-center mb-1 ${(ingestionProgress?.stage_num || 0) >= 3 ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}>
+                          {(ingestionProgress?.stage_num || 0) > 3 ? <CheckCircle className="w-4 h-4" /> : '3'}
+                        </div>
+                        <span>Embed</span>
+                      </div>
+                      <div className={`flex flex-col items-center ${(ingestionProgress?.stage_num || 0) >= 4 ? 'text-blue-600' : 'text-gray-400'}`}>
+                        <div className={`w-6 h-6 rounded-full flex items-center justify-center mb-1 ${(ingestionProgress?.stage_num || 0) >= 4 ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}>
+                          {(ingestionProgress?.stage_num || 0) >= 4 ? <CheckCircle className="w-4 h-4" /> : '4'}
+                        </div>
+                        <span>Done</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 <button
                   type="submit"
                   disabled={loading}
@@ -393,7 +623,7 @@ export function IngestionPage() {
                   ) : (
                     <GitBranch className="h-4 w-4 mr-2" />
                   )}
-                  Ingest Repository
+                  {loading ? 'Ingesting...' : 'Ingest Repository'}
                 </button>
               </form>
             </div>
@@ -569,7 +799,7 @@ export function IngestionPage() {
             <div className="bg-white rounded-lg shadow p-6">
               <h3 className="text-lg font-medium text-gray-900 mb-4">Ingest C/C++ Source Code</h3>
               <p className="text-sm text-gray-600 mb-4">
-                Upload C/C++ source files for AST-based parsing. Functions, classes, and structs will be 
+                Upload C/C++ source files or specify a local directory for AST-based parsing. Functions, classes, and structs will be 
                 extracted and summarized using AI. Embeddings are created at function/class/file level.
               </p>
               
@@ -587,21 +817,73 @@ export function IngestionPage() {
                   />
                 </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Source Files
-                  </label>
-                  <input
-                    type="file"
-                    required
-                    multiple
-                    accept=".c,.h,.cpp,.cc,.cxx,.hpp,.hxx,.hh"
-                    onChange={(e) => setCodeForm({ ...codeForm, files: Array.from(e.target.files || []) })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Supported: .c, .h, .cpp, .cc, .cxx, .hpp, .hxx, .hh
-                  </p>
+                {/* Directory Path Option */}
+                <div className="p-4 bg-gray-50 rounded-md">
+                  <h4 className="text-sm font-medium text-gray-700 mb-3">Option 1: Local Directory</h4>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Directory Path
+                    </label>
+                    <input
+                      type="text"
+                      value={codeForm.directoryPath}
+                      onChange={(e) => setCodeForm({ ...codeForm, directoryPath: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                      placeholder="/path/to/your/code/directory"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Full path to a local directory containing C/C++ source files
+                    </p>
+                  </div>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Max Depth (optional)
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        value={codeForm.maxDepth}
+                        onChange={(e) => setCodeForm({ ...codeForm, maxDepth: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                        placeholder="Unlimited"
+                      />
+                      <p className="text-xs text-gray-500 mt-1">Limit subdirectory depth</p>
+                    </div>
+                    <div className="flex items-center pt-6">
+                      <input
+                        type="checkbox"
+                        id="includeHeaders"
+                        checked={codeForm.includeHeaders}
+                        onChange={(e) => setCodeForm({ ...codeForm, includeHeaders: e.target.checked })}
+                        className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
+                      />
+                      <label htmlFor="includeHeaders" className="ml-2 text-sm text-gray-700">
+                        Include header files (.h, .hpp)
+                      </label>
+                    </div>
+                  </div>
+                </div>
+
+                {/* File Upload Option */}
+                <div className="p-4 bg-gray-50 rounded-md">
+                  <h4 className="text-sm font-medium text-gray-700 mb-3">Option 2: Upload Files</h4>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Source Files
+                    </label>
+                    <input
+                      type="file"
+                      multiple
+                      accept=".c,.h,.cpp,.cc,.cxx,.hpp,.hxx,.hh"
+                      onChange={(e) => setCodeForm({ ...codeForm, files: Array.from(e.target.files || []) })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Supported: .c, .h, .cpp, .cc, .cxx, .hpp, .hxx, .hh
+                    </p>
+                  </div>
                 </div>
 
                 {codeForm.files.length > 0 && (
@@ -641,7 +923,7 @@ export function IngestionPage() {
 
                 <button
                   type="submit"
-                  disabled={loading || codeForm.files.length === 0}
+                  disabled={loading || (codeForm.files.length === 0 && !codeForm.directoryPath)}
                   className="w-full flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 disabled:opacity-50"
                 >
                   {loading ? (
@@ -652,7 +934,7 @@ export function IngestionPage() {
                   ) : (
                     <>
                       <Code className="h-4 w-4 mr-2" />
-                      Ingest {codeForm.files.length} Code File{codeForm.files.length !== 1 ? 's' : ''}
+                      {codeForm.directoryPath ? 'Ingest Directory' : `Ingest ${codeForm.files.length} Code File${codeForm.files.length !== 1 ? 's' : ''}`}
                     </>
                   )}
                 </button>
