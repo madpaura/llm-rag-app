@@ -10,6 +10,8 @@ import structlog
 import aiofiles
 import os
 from pathlib import Path
+from datetime import datetime
+import asyncio
 
 from core.database import get_db, DataSource, Workspace, Document, DocumentChunk, CodeUnit, CodeCallGraph
 from core.config import get_settings
@@ -21,6 +23,33 @@ router = APIRouter()
 security = HTTPBearer()
 settings = get_settings()
 
+# In-memory progress tracking store
+_ingestion_progress: Dict[int, Dict[str, Any]] = {}
+
+def update_progress(data_source_id: int, stage: str, stage_num: int, total_stages: int,
+                   current: int = 0, total: int = 0, message: str = ""):
+    """Update ingestion progress for a data source."""
+    _ingestion_progress[data_source_id] = {
+        "stage": stage,
+        "stage_num": stage_num,
+        "total_stages": total_stages,
+        "current": current,
+        "total": total,
+        "message": message,
+        "percent": int((current / total * 100) if total > 0 else 0),
+        "updated_at": datetime.utcnow().isoformat()
+    }
+    logger.info(f"[PROGRESS] DS {data_source_id}: Stage {stage_num}/{total_stages} - {stage} ({current}/{total}) {message}")
+
+def get_progress(data_source_id: int) -> Optional[Dict[str, Any]]:
+    """Get ingestion progress for a data source."""
+    return _ingestion_progress.get(data_source_id)
+
+def clear_progress(data_source_id: int):
+    """Clear progress tracking for a data source."""
+    if data_source_id in _ingestion_progress:
+        del _ingestion_progress[data_source_id]
+
 class GitIngestionRequest(BaseModel):
     workspace_id: int
     name: str
@@ -28,6 +57,8 @@ class GitIngestionRequest(BaseModel):
     branch: Optional[str] = "main"
     username: Optional[str] = None
     token: Optional[str] = None
+    language_filter: Optional[str] = None  # Filter by language: 'all', 'c_cpp', 'python', 'javascript', 'java', 'docs'
+    max_depth: Optional[int] = None  # Max directory depth to scan
 
 class ConfluenceIngestionRequest(BaseModel):
     workspace_id: int
@@ -42,6 +73,8 @@ class CodeIngestionRequest(BaseModel):
     workspace_id: int
     name: str
     directory_path: Optional[str] = None  # For local directory ingestion
+    max_depth: Optional[int] = None  # Max directory depth to scan (None = unlimited)
+    include_headers: bool = True  # Include header files (.h, .hpp, etc.)
 
 class DataSourceResponse(BaseModel):
     id: int
@@ -80,6 +113,45 @@ async def get_data_sources(
     
     return result
 
+@router.get("/progress/{data_source_id}")
+async def get_ingestion_progress(
+    data_source_id: int,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Get the progress of an ongoing ingestion job."""
+    # Check if data source exists
+    data_source = db.query(DataSource).filter(DataSource.id == data_source_id).first()
+    if not data_source:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Data source not found"
+        )
+    
+    progress = get_progress(data_source_id)
+    
+    if progress:
+        return {
+            "data_source_id": data_source_id,
+            "status": data_source.status,
+            "in_progress": True,
+            **progress
+        }
+    else:
+        # No active progress, return status from DB
+        return {
+            "data_source_id": data_source_id,
+            "status": data_source.status,
+            "in_progress": False,
+            "stage": "Completed" if data_source.status == "completed" else data_source.status.title(),
+            "stage_num": 4 if data_source.status == "completed" else 0,
+            "total_stages": 4,
+            "current": 0,
+            "total": 0,
+            "percent": 100 if data_source.status == "completed" else 0,
+            "message": ""
+        }
+
 @router.post("/git")
 async def ingest_git_repository(
     request: GitIngestionRequest,
@@ -100,7 +172,9 @@ async def ingest_git_repository(
         config = {
             "branch": request.branch,
             "username": request.username,
-            "token": request.token
+            "token": request.token,
+            "language_filter": request.language_filter,
+            "max_depth": request.max_depth
         }
         
         data_source = DataSource(
@@ -114,20 +188,40 @@ async def ingest_git_repository(
         db.add(data_source)
         db.commit()
         
-        # Start ingestion process
-        orchestrator = IngestionOrchestrator()
-        result = await orchestrator.ingest_data_source(data_source.id)
+        # Initialize progress tracking
+        update_progress(data_source.id, "Initializing", 1, 4, 0, 1, "Starting ingestion...")
+        
+        # Start ingestion process in background
+        async def run_ingestion():
+            try:
+                orchestrator = IngestionOrchestrator()
+                result = await orchestrator.ingest_data_source(data_source.id, progress_callback=update_progress)
+                
+                if not result["success"]:
+                    logger.error(f"Ingestion failed for data source {data_source.id}: {result.get('error')}")
+                
+                # Clear progress on completion (after a short delay so frontend can see final state)
+                await asyncio.sleep(2)
+                clear_progress(data_source.id)
+            except Exception as e:
+                logger.error(f"Background ingestion error: {e}")
+                clear_progress(data_source.id)
+        
+        # Start the background task
+        asyncio.create_task(run_ingestion())
         
         return {
-            "success": result["success"],
+            "success": True,
             "data_source_id": data_source.id,
-            "message": f"Git repository ingestion {'completed' if result['success'] else 'failed'}",
-            "documents_count": result.get("documents_count", 0) if result["success"] else 0,
-            "error": result.get("error") if not result["success"] else None
+            "message": "Git repository ingestion started",
+            "documents_count": 0,
+            "in_progress": True
         }
         
     except Exception as e:
-        logger.error(f"Error ingesting Git repository: {e}")
+        logger.error(f"Error starting Git repository ingestion: {e}")
+        if 'data_source' in locals():
+            clear_progress(data_source.id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
@@ -537,7 +631,11 @@ async def ingest_code_directory(
             name=request.name,
             source_type="code",
             source_url=request.directory_path,
-            status="processing"
+            status="processing",
+            config={
+                "max_depth": request.max_depth,
+                "include_headers": request.include_headers
+            }
         )
         db.add(data_source)
         db.commit()
@@ -548,7 +646,9 @@ async def ingest_code_directory(
             directory=request.directory_path,
             workspace_id=request.workspace_id,
             data_source_id=data_source.id,
-            db=db
+            db=db,
+            max_depth=request.max_depth,
+            include_headers=request.include_headers
         )
         
         # Update data source status

@@ -42,7 +42,9 @@ class CodeIngestionService:
         workspace_id: int,
         data_source_id: int,
         db: Session,
-        recursive: bool = True
+        recursive: bool = True,
+        max_depth: Optional[int] = None,
+        include_headers: bool = True
     ) -> Dict[str, Any]:
         """
         Ingest all C/C++ files from a directory.
@@ -53,6 +55,8 @@ class CodeIngestionService:
             data_source_id: Data source ID
             db: Database session
             recursive: Search subdirectories
+            max_depth: Maximum directory depth to scan (None = unlimited)
+            include_headers: Include header files (.h, .hpp, etc.)
             
         Returns:
             Ingestion statistics
@@ -69,8 +73,13 @@ class CodeIngestionService:
         
         try:
             # Parse all files
-            self.logger.info(f"Parsing C/C++ files in {directory}")
-            file_units = self.parser.parse_directory(directory, recursive)
+            self.logger.info(f"Parsing C/C++ files in {directory} (max_depth={max_depth}, include_headers={include_headers})")
+            file_units = self.parser.parse_directory(
+                directory, 
+                recursive, 
+                max_depth=max_depth,
+                include_headers=include_headers
+            )
             stats["files_processed"] = len(file_units)
             
             if not file_units:

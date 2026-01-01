@@ -243,8 +243,26 @@ export const api = {
     branch?: string;
     username?: string;
     token?: string;
+    language_filter?: string;
+    max_depth?: number;
   }): Promise<IngestionResponse> {
     const response = await apiClient.post('/api/ingestion/git', data);
+    return response.data;
+  },
+
+  async getIngestionProgress(dataSourceId: number): Promise<{
+    data_source_id: number;
+    status: string;
+    in_progress: boolean;
+    stage: string;
+    stage_num: number;
+    total_stages: number;
+    current: number;
+    total: number;
+    percent: number;
+    message: string;
+  }> {
+    const response = await apiClient.get(`/api/ingestion/progress/${dataSourceId}`);
     return response.data;
   },
 
@@ -397,12 +415,16 @@ export const api = {
   async ingestCodeDirectory(
     workspaceId: number,
     name: string,
-    directoryPath: string
+    directoryPath: string,
+    maxDepth?: number,
+    includeHeaders: boolean = true
   ): Promise<CodeIngestionResponse> {
     const response = await apiClient.post('/api/ingestion/code/directory', {
       workspace_id: workspaceId,
       name,
       directory_path: directoryPath,
+      max_depth: maxDepth,
+      include_headers: includeHeaders,
     });
     return response.data;
   },

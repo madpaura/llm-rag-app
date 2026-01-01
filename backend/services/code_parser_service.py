@@ -454,7 +454,9 @@ class CodeParserService:
     def parse_directory(
         self, 
         directory: str, 
-        recursive: bool = True
+        recursive: bool = True,
+        max_depth: Optional[int] = None,
+        include_headers: bool = True
     ) -> List[CodeUnit]:
         """
         Parse all C/C++ files in a directory.
@@ -462,12 +464,41 @@ class CodeParserService:
         Args:
             directory: Path to directory
             recursive: Whether to search subdirectories
+            max_depth: Maximum directory depth to scan (None = unlimited)
+            include_headers: Include header files (.h, .hpp, etc.)
             
         Returns:
             List of CodeUnit objects for each file
         """
         file_units = []
         dir_path = Path(directory)
+        base_depth = len(dir_path.parts)
+        
+        # Define which extensions to include
+        source_extensions = {'.c', '.cpp', '.cc', '.cxx'}
+        header_extensions = {'.h', '.hpp', '.hxx', '.hh'}
+        
+        if include_headers:
+            allowed_extensions = source_extensions | header_extensions
+        else:
+            allowed_extensions = source_extensions
+        
+        def should_include_file(file_path: Path) -> bool:
+            """Check if file should be included based on extension and depth."""
+            if not file_path.is_file():
+                return False
+            
+            ext = file_path.suffix.lower()
+            if ext not in allowed_extensions:
+                return False
+            
+            # Check depth
+            if max_depth is not None:
+                file_depth = len(file_path.parts) - base_depth
+                if file_depth > max_depth:
+                    return False
+            
+            return True
         
         if recursive:
             files = dir_path.rglob('*')
@@ -475,7 +506,7 @@ class CodeParserService:
             files = dir_path.glob('*')
         
         for file_path in files:
-            if file_path.is_file() and self.is_supported_file(str(file_path)):
+            if should_include_file(file_path):
                 try:
                     unit = self.parse_file(str(file_path))
                     file_units.append(unit)

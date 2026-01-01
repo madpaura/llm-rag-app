@@ -114,14 +114,42 @@ class GitIngestionService:
         self.clone_dir.mkdir(parents=True, exist_ok=True)
         self.chunker = TextChunker()
     
-    async def ingest_repository(self, repo_url: str, workspace_id: int, branch: str = "main") -> Dict[str, Any]:
+    # Language filter presets
+    LANGUAGE_FILTERS = {
+        'all': {'.py', '.js', '.ts', '.tsx', '.jsx', '.java', '.cpp', '.c', '.h', '.hpp', '.cc', '.cxx',
+                '.md', '.txt', '.rst', '.json', '.yaml', '.yml', '.go', '.rs', '.rb', '.php', '.cs', '.swift'},
+        'c_cpp': {'.c', '.h', '.cpp', '.cc', '.cxx', '.hpp', '.hxx', '.hh'},
+        'python': {'.py', '.pyi', '.pyx'},
+        'javascript': {'.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'},
+        'java': {'.java'},
+        'docs': {'.md', '.txt', '.rst', '.adoc', '.org'},
+        'go': {'.go'},
+        'rust': {'.rs'},
+    }
+    
+    async def ingest_repository(
+        self, 
+        repo_url: str, 
+        workspace_id: int, 
+        branch: str = "main",
+        language_filter: Optional[str] = None,
+        max_depth: Optional[int] = None
+    ) -> Dict[str, Any]:
         """Clone and ingest a Git repository."""
         try:
-            logger.info(f"Starting Git ingestion for {repo_url}")
+            logger.info(f"Starting Git ingestion for {repo_url} (language={language_filter}, max_depth={max_depth})")
+            
+            # Determine which extensions to include
+            if language_filter and language_filter in self.LANGUAGE_FILTERS:
+                supported_extensions = self.LANGUAGE_FILTERS[language_filter]
+            else:
+                # Default: all supported extensions
+                supported_extensions = self.LANGUAGE_FILTERS['all']
             
             # Create temporary directory for cloning
             with tempfile.TemporaryDirectory() as temp_dir:
                 repo_path = Path(temp_dir) / "repo"
+                base_depth = len(repo_path.parts)
                 
                 # Clone repository
                 try:
@@ -133,30 +161,41 @@ class GitIngestionService:
                 
                 # Process files
                 documents = []
-                supported_extensions = {'.py', '.js', '.ts', '.java', '.cpp', '.c', '.h', 
-                                      '.md', '.txt', '.rst', '.json', '.yaml', '.yml'}
                 
                 for file_path in repo_path.rglob('*'):
-                    if file_path.is_file() and file_path.suffix.lower() in supported_extensions:
-                        try:
-                            content = await self._read_file(file_path)
-                            if content:
-                                relative_path = file_path.relative_to(repo_path)
-                                documents.append({
-                                    'title': str(relative_path),
-                                    'content': content,
-                                    'file_path': str(relative_path),
-                                    'file_type': file_path.suffix.lower(),
-                                    'source_type': 'git',
-                                    'workspace_id': workspace_id,
-                                    'metadata': {
-                                        'repo_url': repo_url,
-                                        'branch': branch,
-                                        'file_size': file_path.stat().st_size
-                                    }
-                                })
-                        except Exception as e:
-                            logger.warning(f"Failed to read file {file_path}: {e}")
+                    if not file_path.is_file():
+                        continue
+                    
+                    # Check extension
+                    if file_path.suffix.lower() not in supported_extensions:
+                        continue
+                    
+                    # Check depth
+                    if max_depth is not None:
+                        file_depth = len(file_path.parts) - base_depth
+                        if file_depth > max_depth:
+                            continue
+                    
+                    try:
+                        content = await self._read_file(file_path)
+                        if content:
+                            relative_path = file_path.relative_to(repo_path)
+                            documents.append({
+                                'title': str(relative_path),
+                                'content': content,
+                                'file_path': str(relative_path),
+                                'file_type': file_path.suffix.lower(),
+                                'source_type': 'git',
+                                'workspace_id': workspace_id,
+                                'metadata': {
+                                    'repo_url': repo_url,
+                                    'branch': branch,
+                                    'file_size': file_path.stat().st_size,
+                                    'language_filter': language_filter
+                                }
+                            })
+                    except Exception as e:
+                        logger.warning(f"Failed to read file {file_path}: {e}")
                 
                 logger.info(f"Processed {len(documents)} files from repository")
                 return {"success": True, "documents": documents}
@@ -560,7 +599,7 @@ class IngestionOrchestrator:
         self.vector_service = VectorService()
         self.chunker = TextChunker()
     
-    async def ingest_data_source(self, data_source_id: int) -> Dict[str, Any]:
+    async def ingest_data_source(self, data_source_id: int, progress_callback=None) -> Dict[str, Any]:
         """Ingest data from a data source."""
         try:
             # Get data source from database
@@ -575,11 +614,19 @@ class IngestionOrchestrator:
             db.commit()
             
             # Ingest based on source type
+            logger.info(f"[STAGE 1/4] Starting ingestion for data source {data_source_id} (type: {data_source.source_type})")
+            if progress_callback:
+                progress_callback(data_source_id, "Cloning Repository", 1, 4, 0, 1, "Fetching files from source...")
+            
             if data_source.source_type == "git":
+                config = data_source.config or {}
+                logger.info(f"[GIT] Cloning repository: {data_source.source_url}")
                 result = await self.git_service.ingest_repository(
                     data_source.source_url, 
                     data_source.workspace_id,
-                    data_source.config.get('branch', 'main') if data_source.config else 'main'
+                    branch=config.get('branch', 'main'),
+                    language_filter=config.get('language_filter'),
+                    max_depth=config.get('max_depth')
                 )
             elif data_source.source_type == "confluence":
                 config = data_source.config or {}
@@ -602,12 +649,19 @@ class IngestionOrchestrator:
             if result["success"]:
                 # Process and store documents
                 documents = result["documents"]
-                await self._process_documents(documents, data_source_id, db)
+                logger.info(f"[GIT] Clone complete. Found {len(documents)} files to process.")
+                if progress_callback:
+                    progress_callback(data_source_id, "Processing Documents", 2, 4, 0, len(documents), f"Processing {len(documents)} files...")
+                
+                await self._process_documents(documents, data_source_id, db, progress_callback)
                 
                 # Update status to completed
                 data_source.status = "completed"
                 data_source.last_ingested = func.now()
                 db.commit()
+                
+                if progress_callback:
+                    progress_callback(data_source_id, "Complete", 4, 4, len(documents), len(documents), "Ingestion complete!")
                 
                 logger.info(f"Successfully ingested {len(documents)} documents from data source {data_source_id}")
                 return {"success": True, "documents_count": len(documents)}
@@ -622,12 +676,25 @@ class IngestionOrchestrator:
             return {"success": False, "error": str(e)}
     
     async def _process_documents(self, documents: List[Dict[str, Any]], 
-                               data_source_id: int, db) -> None:
+                               data_source_id: int, db,
+                               progress_callback=None) -> None:
         """Process documents: chunk, embed, and store."""
         try:
             all_chunks = []
+            total_docs = len(documents)
             
-            for doc_data in documents:
+            logger.info(f"[STAGE 2/4] Starting document processing for {total_docs} documents")
+            if progress_callback:
+                progress_callback(data_source_id, "Processing Documents", 2, 4, 0, total_docs, "Chunking files...")
+            
+            for idx, doc_data in enumerate(documents):
+                doc_title = doc_data['title'][:50] if doc_data['title'] else 'Unknown'
+                logger.info(f"[DOC {idx+1}/{total_docs}] Processing: {doc_title}")
+                
+                # Update progress every 5 documents
+                if progress_callback and (idx % 5 == 0 or idx == total_docs - 1):
+                    progress_callback(data_source_id, "Processing Documents", 2, 4, idx + 1, total_docs, f"Processing: {doc_title}")
+                
                 # Create document record
                 document = Document(
                     data_source_id=data_source_id,
@@ -641,7 +708,9 @@ class IngestionOrchestrator:
                 db.flush()  # Get the ID
                 
                 # Chunk the document
+                logger.debug(f"[DOC {idx+1}/{total_docs}] Chunking document...")
                 chunks = self.chunker.chunk_text(doc_data['content'], doc_data.get('metadata', {}))
+                logger.info(f"[DOC {idx+1}/{total_docs}] Created {len(chunks)} chunks")
                 
                 for chunk_data in chunks:
                     chunk = DocumentChunk(
@@ -664,13 +733,38 @@ class IngestionOrchestrator:
                         'chunk_id': chunk.id,
                         **chunk_data['metadata']
                     })
+                
+                # Report progress every 10 documents
+                if (idx + 1) % 10 == 0:
+                    logger.info(f"[PROGRESS] Processed {idx+1}/{total_docs} documents ({len(all_chunks)} chunks so far)")
+            
+            logger.info(f"[STAGE 3/4] Document processing complete. Total chunks: {len(all_chunks)}")
+            if progress_callback:
+                progress_callback(data_source_id, "Creating Embeddings", 3, 4, 0, len(all_chunks), "Generating vector embeddings...")
             
             # Add to vector store
             if all_chunks:
-                success = await self.vector_service.add_documents(all_chunks)
-                if not success:
-                    logger.error("Failed to add documents to vector store")
+                logger.info(f"[STAGE 4/4] Adding {len(all_chunks)} chunks to vector store...")
+                
+                # Process in batches to avoid timeout
+                batch_size = 50
+                total_batches = (len(all_chunks) + batch_size - 1) // batch_size
+                
+                for i in range(0, len(all_chunks), batch_size):
+                    batch = all_chunks[i:i+batch_size]
+                    batch_num = (i // batch_size) + 1
+                    logger.info(f"[EMBEDDING] Processing batch {batch_num}/{total_batches} ({len(batch)} chunks)")
+                    
+                    if progress_callback:
+                        progress_callback(data_source_id, "Creating Embeddings", 3, 4, i, len(all_chunks), f"Embedding batch {batch_num}/{total_batches}...")
+                    
+                    success = await self.vector_service.add_documents(batch)
+                    if not success:
+                        logger.error(f"Failed to add batch {batch_num} to vector store")
+                    else:
+                        logger.info(f"[EMBEDDING] Batch {batch_num}/{total_batches} complete")
             
+            logger.info(f"[COMPLETE] All documents processed and embedded successfully")
             db.commit()
             
         except Exception as e:
