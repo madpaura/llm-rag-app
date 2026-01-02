@@ -14,43 +14,60 @@ from .config import get_settings
 logger = structlog.get_logger()
 settings = get_settings()
 
-# Database setup
-# SQLite requires special handling for concurrency
-if settings.DATABASE_URL.startswith("sqlite"):
-    # SQLite-specific settings to handle concurrent access
-    engine = create_engine(
-        settings.DATABASE_URL,
-        connect_args={
-            "check_same_thread": False,  # Allow multi-threaded access
-            "timeout": 30  # Wait up to 30 seconds for locks
-        },
-        pool_pre_ping=True,  # Check connection health before use
-        echo=False
-    )
-else:
-    # PostgreSQL/MySQL with connection pooling
-    engine = create_engine(
-        settings.DATABASE_URL,
-        pool_size=settings.DATABASE_POOL_SIZE,
-        max_overflow=settings.DATABASE_MAX_OVERFLOW,
-        pool_pre_ping=True,
-        echo=False
-    )
+# Database setup with proper connection pooling for concurrent operations
+def create_db_engine():
+    """Create database engine based on configuration."""
+    db_url = settings.DATABASE_URL
+    
+    if db_url.startswith("sqlite"):
+        # SQLite-specific settings (for development/testing only)
+        logger.warning("Using SQLite - not recommended for production with concurrent users")
+        engine = create_engine(
+            db_url,
+            connect_args={
+                "check_same_thread": False,
+                "timeout": 30
+            },
+            pool_pre_ping=True,
+            echo=False
+        )
+        
+        # Enable WAL mode for better concurrent access
+        from sqlalchemy import event
+        
+        @event.listens_for(engine, "connect")
+        def set_sqlite_pragma(dbapi_connection, connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.close()
+    else:
+        # PostgreSQL with optimized connection pooling for multi-user scenarios
+        from sqlalchemy.pool import QueuePool
+        
+        engine = create_engine(
+            db_url,
+            poolclass=QueuePool,
+            pool_size=settings.DATABASE_POOL_SIZE,
+            max_overflow=settings.DATABASE_MAX_OVERFLOW,
+            pool_timeout=settings.DATABASE_POOL_TIMEOUT,
+            pool_recycle=settings.DATABASE_POOL_RECYCLE,
+            pool_pre_ping=True,  # Verify connections before use
+            echo=False,
+            # PostgreSQL-specific optimizations
+            connect_args={
+                "options": "-c timezone=utc"
+            } if "postgresql" in db_url else {}
+        )
+        logger.info(f"PostgreSQL connection pool: size={settings.DATABASE_POOL_SIZE}, "
+                   f"max_overflow={settings.DATABASE_MAX_OVERFLOW}")
+    
+    return engine
 
+engine = create_db_engine()
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
-
-# Enable WAL mode for SQLite to improve concurrent access
-if settings.DATABASE_URL.startswith("sqlite"):
-    from sqlalchemy import event
-    
-    @event.listens_for(engine, "connect")
-    def set_sqlite_pragma(dbapi_connection, connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=30000")  # 30 second timeout
-        cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.close()
 
 # Database Models
 class User(Base):

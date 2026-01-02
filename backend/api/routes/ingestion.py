@@ -480,11 +480,11 @@ async def ingest_document(
                 detail=f"File too large. Maximum size is {settings.MAX_FILE_SIZE} bytes"
             )
         
-        # Save uploaded file
-        upload_dir = Path(settings.UPLOAD_DIR)
+        # Save uploaded file to workspace-isolated directory
+        upload_dir = Path(settings.DATA_BASE_DIR) / str(workspace_id) / "uploads"
         upload_dir.mkdir(parents=True, exist_ok=True)
         
-        file_path = upload_dir / f"{workspace_id}_{file.filename}"
+        file_path = upload_dir / file.filename
         
         async with aiofiles.open(file_path, 'wb') as f:
             content = await file.read()

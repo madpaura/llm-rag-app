@@ -163,12 +163,21 @@ class RAGQueryService:
     """
     Main RAG query service combining retrieval and generation.
     Supports multiple RAG techniques: standard, rag_fusion, hyde, multi_query.
+    Now uses workspace-isolated vector stores.
     """
     
-    def __init__(self):
-        self.vector_service = VectorService()
+    def __init__(self, workspace_id: int = None):
+        self.workspace_id = workspace_id
+        # VectorService is now workspace-isolated - lazy loaded per query
+        self._vector_service = None
         self.llm_service = LLMService()
         self._ollama_service = get_ollama_service() if settings.LLM_PROVIDER == "ollama" else None
+    
+    def _get_vector_service(self, workspace_id: int) -> VectorService:
+        """Get workspace-isolated vector service."""
+        if self._vector_service is None or self._vector_service.workspace_id != workspace_id:
+            self._vector_service = VectorService(workspace_id=workspace_id)
+        return self._vector_service
     
     async def query(
         self, 
@@ -236,11 +245,11 @@ class RAGQueryService:
         k: int
     ) -> Dict[str, Any]:
         """Standard RAG: retrieve then generate."""
-        # Retrieve relevant documents
-        retrieved_docs = await self.vector_service.search_documents(
+        # Retrieve relevant documents from workspace-isolated vector store
+        vector_service = self._get_vector_service(workspace_id)
+        retrieved_docs = await vector_service.search_documents(
             query=question,
-            k=k,
-            workspace_id=workspace_id
+            k=k
         )
         
         if not retrieved_docs:
@@ -307,12 +316,12 @@ Alternative questions:"""
         # Retrieve documents for each query
         all_docs = []
         seen_ids = set()
+        vector_service = self._get_vector_service(workspace_id)
         
         for query in queries:
-            docs = await self.vector_service.search_documents(
+            docs = await vector_service.search_documents(
                 query=query,
-                k=k,
-                workspace_id=workspace_id
+                k=k
             )
             for doc in docs:
                 doc_id = doc.get('id')
@@ -382,10 +391,10 @@ Passage:"""
         logger.info(f"HyDE generated hypothetical document: {len(hypothetical_doc)} chars")
         
         # Use hypothetical document to retrieve
-        retrieved_docs = await self.vector_service.search_documents(
+        vector_service = self._get_vector_service(workspace_id)
+        retrieved_docs = await vector_service.search_documents(
             query=hypothetical_doc,
-            k=k,
-            workspace_id=workspace_id
+            k=k
         )
         
         if not retrieved_docs:
@@ -450,12 +459,12 @@ Alternative questions:"""
         # Retrieve and combine
         all_docs = []
         seen_ids = set()
+        vector_service = self._get_vector_service(workspace_id)
         
         for query in queries:
-            docs = await self.vector_service.search_documents(
+            docs = await vector_service.search_documents(
                 query=query,
-                k=k,
-                workspace_id=workspace_id
+                k=k
             )
             for doc in docs:
                 doc_id = doc.get('id')

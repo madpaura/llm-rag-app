@@ -15,17 +15,22 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     VERSION: str = "1.0.0"
     
-    # Database
-    DATABASE_URL: str = "sqlite:///./data/rag.db"
-    DATABASE_POOL_SIZE: int = 10
-    DATABASE_MAX_OVERFLOW: int = 20
+    # Database - PostgreSQL recommended for production (better concurrency)
+    # SQLite: sqlite:///./data/rag.db
+    # PostgreSQL: postgresql://user:password@localhost:5432/rag_db
+    DATABASE_URL: str = "postgresql://rag_user:rag_password@localhost:5432/rag_db"
+    DATABASE_POOL_SIZE: int = 20
+    DATABASE_MAX_OVERFLOW: int = 40
+    DATABASE_POOL_TIMEOUT: int = 30
+    DATABASE_POOL_RECYCLE: int = 1800  # Recycle connections after 30 minutes
     
     # Vector Database
     VECTOR_DB_TYPE: str = "faiss"  # faiss, pinecone, weaviate
     PINECONE_API_KEY: Optional[str] = None
     PINECONE_ENVIRONMENT: Optional[str] = None
     WEAVIATE_URL: Optional[str] = None
-    FAISS_INDEX_PATH: str = "./data/faiss_index"
+    # FAISS indexes are now workspace-isolated: ./data/workspaces/{workspace_id}/faiss_index
+    FAISS_BASE_PATH: str = "./data/workspaces"
     
     # LLM Configuration
     LLM_PROVIDER: str = "ollama"  # ollama, openai
@@ -64,12 +69,13 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:8080", "http://localhost", "http://127.0.0.1"]
     ALLOWED_HOSTS: List[str] = ["localhost", "127.0.0.1", "*"]
     
-    # File Storage
-    UPLOAD_DIR: str = "./data/uploads"
+    # File Storage - Now workspace-isolated
+    # Uploads: ./data/workspaces/{workspace_id}/uploads
+    # Git repos: ./data/workspaces/{workspace_id}/git_repos
+    DATA_BASE_DIR: str = "./data/workspaces"
     MAX_FILE_SIZE: int = 100 * 1024 * 1024  # 100MB
     
     # Git Integration
-    GIT_CLONE_DIR: str = "./data/git_repos"
     GIT_TIMEOUT: int = 300  # 5 minutes
     
     # Confluence Integration

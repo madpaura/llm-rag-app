@@ -40,15 +40,17 @@ class VectorStore(ABC):
         pass
 
 class FAISSVectorStore(VectorStore):
-    """FAISS-based vector store implementation."""
+    """FAISS-based vector store implementation with workspace isolation."""
     
-    def __init__(self, index_path: str, dimension: int = 384):
+    def __init__(self, index_path: str, dimension: int = 384, workspace_id: int = None):
         self.index_path = index_path
         self.dimension = dimension
+        self.workspace_id = workspace_id
         self.index = None
         self.metadata = {}
         self.id_to_index = {}
         self.index_to_id = {}
+        self._lock = asyncio.Lock()  # Lock for thread-safe operations
         self._load_index()
     
     def _load_index(self):
@@ -95,49 +97,50 @@ class FAISSVectorStore(VectorStore):
             logger.error(f"Error saving FAISS index: {e}")
     
     async def add_vectors(self, vectors: List[np.ndarray], metadata: List[Dict[str, Any]], ids: List[str]) -> bool:
-        """Add vectors to FAISS index."""
-        try:
-            if len(vectors) != len(metadata) or len(vectors) != len(ids):
-                raise ValueError("Vectors, metadata, and IDs must have same length")
-            
-            if len(vectors) == 0:
-                logger.warning("No vectors to add")
+        """Add vectors to FAISS index with thread-safe locking."""
+        async with self._lock:
+            try:
+                if len(vectors) != len(metadata) or len(vectors) != len(ids):
+                    raise ValueError("Vectors, metadata, and IDs must have same length")
+                
+                if len(vectors) == 0:
+                    logger.warning("No vectors to add")
+                    return True
+                
+                # Check vector dimension matches index
+                vector_dim = vectors[0].shape[0]
+                if vector_dim != self.dimension:
+                    logger.error(f"Vector dimension mismatch: vectors have dim {vector_dim}, index expects {self.dimension}")
+                    # Recreate index with correct dimension
+                    self.dimension = vector_dim
+                    self.index = faiss.IndexFlatIP(self.dimension)
+                    self.metadata = {}
+                    self.id_to_index = {}
+                    self.index_to_id = {}
+                    logger.info(f"Recreated FAISS index with dimension {self.dimension}")
+                
+                # Normalize vectors for cosine similarity
+                vectors_array = np.array(vectors).astype('float32')
+                faiss.normalize_L2(vectors_array)
+                
+                # Add to index
+                start_idx = self.index.ntotal
+                self.index.add(vectors_array)
+                
+                # Update mappings
+                for i, vector_id in enumerate(ids):
+                    idx = start_idx + i
+                    self.id_to_index[vector_id] = idx
+                    self.index_to_id[idx] = vector_id
+                    self.metadata[vector_id] = metadata[i]
+                
+                self._save_index()
+                logger.info(f"Added {len(vectors)} vectors to FAISS index (workspace={self.workspace_id})")
                 return True
-            
-            # Check vector dimension matches index
-            vector_dim = vectors[0].shape[0]
-            if vector_dim != self.dimension:
-                logger.error(f"Vector dimension mismatch: vectors have dim {vector_dim}, index expects {self.dimension}")
-                # Recreate index with correct dimension
-                self.dimension = vector_dim
-                self.index = faiss.IndexFlatIP(self.dimension)
-                self.metadata = {}
-                self.id_to_index = {}
-                self.index_to_id = {}
-                logger.info(f"Recreated FAISS index with dimension {self.dimension}")
-            
-            # Normalize vectors for cosine similarity
-            vectors_array = np.array(vectors).astype('float32')
-            faiss.normalize_L2(vectors_array)
-            
-            # Add to index
-            start_idx = self.index.ntotal
-            self.index.add(vectors_array)
-            
-            # Update mappings
-            for i, vector_id in enumerate(ids):
-                idx = start_idx + i
-                self.id_to_index[vector_id] = idx
-                self.index_to_id[idx] = vector_id
-                self.metadata[vector_id] = metadata[i]
-            
-            self._save_index()
-            logger.info(f"Added {len(vectors)} vectors to FAISS index")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error adding vectors to FAISS: {e}")
-            return False
+                
+            except Exception as e:
+                logger.error(f"Error adding vectors to FAISS: {e}")
+                return False
     
     async def search(self, query_vector: np.ndarray, k: int = 5) -> List[Tuple[str, float, Dict[str, Any]]]:
         """Search for similar vectors in FAISS index."""
@@ -326,25 +329,64 @@ class EmbeddingService:
             return np.array([])
 
 class VectorService:
-    """Main vector service combining embedding and storage."""
+    """Main vector service combining embedding and storage with workspace isolation."""
     
-    def __init__(self, embedding_provider: Optional[str] = None):
+    # Cache of workspace-specific vector stores for concurrent access
+    _workspace_stores: Dict[int, 'FAISSVectorStore'] = {}
+    _stores_lock = asyncio.Lock()
+    
+    def __init__(self, workspace_id: int = None, embedding_provider: Optional[str] = None):
+        self.workspace_id = workspace_id
         self.embedding_service = EmbeddingService(provider=embedding_provider)
-        self.vector_store = self._create_vector_store()
+        self.vector_store = None  # Lazy initialization
     
-    def _create_vector_store(self) -> VectorStore:
-        """Create vector store based on configuration."""
-        if settings.VECTOR_DB_TYPE == "faiss":
-            return FAISSVectorStore(
-                settings.FAISS_INDEX_PATH,
-                dimension=self.embedding_service.dimension
+    async def _get_vector_store(self) -> VectorStore:
+        """Get or create workspace-isolated vector store."""
+        if self.vector_store is not None:
+            return self.vector_store
+        
+        if self.workspace_id is None:
+            raise ValueError("workspace_id is required for vector operations")
+        
+        async with VectorService._stores_lock:
+            # Check if already cached
+            if self.workspace_id in VectorService._workspace_stores:
+                self.vector_store = VectorService._workspace_stores[self.workspace_id]
+                return self.vector_store
+            
+            # Create workspace-isolated index path
+            workspace_index_path = os.path.join(
+                settings.FAISS_BASE_PATH,
+                str(self.workspace_id),
+                "faiss_index"
             )
-        else:
-            raise ValueError(f"Unsupported vector DB type: {settings.VECTOR_DB_TYPE}")
+            os.makedirs(os.path.dirname(workspace_index_path), exist_ok=True)
+            
+            self.vector_store = FAISSVectorStore(
+                workspace_index_path,
+                dimension=self.embedding_service.dimension,
+                workspace_id=self.workspace_id
+            )
+            
+            # Cache for reuse
+            VectorService._workspace_stores[self.workspace_id] = self.vector_store
+            logger.info(f"Created vector store for workspace {self.workspace_id}")
+            
+            return self.vector_store
+    
+    @classmethod
+    async def clear_workspace_store(cls, workspace_id: int):
+        """Clear cached vector store for a workspace (e.g., when workspace is deleted)."""
+        async with cls._stores_lock:
+            if workspace_id in cls._workspace_stores:
+                del cls._workspace_stores[workspace_id]
+                logger.info(f"Cleared vector store cache for workspace {workspace_id}")
     
     async def add_documents(self, documents: List[Dict[str, Any]]) -> bool:
-        """Add documents to vector store."""
+        """Add documents to workspace-isolated vector store."""
         try:
+            vector_store = await self._get_vector_store()
+            
             texts = [doc['content'] for doc in documents]
             embeddings = await self.embedding_service.encode(texts)
             
@@ -355,36 +397,37 @@ class VectorService:
             # Include content in metadata so it can be retrieved during search
             metadata = [doc.copy() for doc in documents]
             
-            return await self.vector_store.add_vectors(embeddings, metadata, ids)
+            return await vector_store.add_vectors(embeddings, metadata, ids)
             
         except Exception as e:
             logger.error(f"Error adding documents to vector store: {e}")
             return False
     
-    async def search_documents(self, query: str, k: int = 5, workspace_id: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Search for relevant documents."""
+    async def search_documents(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
+        """Search for relevant documents in workspace-isolated store."""
         try:
+            vector_store = await self._get_vector_store()
+            
             query_embedding = await self.embedding_service.encode_single(query)
             if query_embedding.size == 0:
                 return []
             
-            results = await self.vector_store.search(query_embedding, k)
+            results = await vector_store.search(query_embedding, k)
             
-            # Filter by workspace if specified
+            # No need to filter by workspace - store is already workspace-isolated
             filtered_results = []
             for vector_id, score, metadata in results:
                 if metadata.get('deleted'):
                     continue
                 
-                if workspace_id is None or metadata.get('workspace_id') == workspace_id:
-                    filtered_results.append({
-                        'id': vector_id,
-                        'score': score,
-                        'content': metadata.get('content', ''),
-                        'title': metadata.get('title', ''),
-                        'source': metadata.get('source', ''),
-                        'metadata': metadata
-                    })
+                filtered_results.append({
+                    'id': vector_id,
+                    'score': score,
+                    'content': metadata.get('content', ''),
+                    'title': metadata.get('title', ''),
+                    'source': metadata.get('source', ''),
+                    'metadata': metadata
+                })
             
             return filtered_results
             
@@ -394,4 +437,5 @@ class VectorService:
     
     async def delete_documents(self, document_ids: List[str]) -> bool:
         """Delete documents from vector store."""
-        return await self.vector_store.delete_vectors(document_ids)
+        vector_store = await self._get_vector_store()
+        return await vector_store.delete_vectors(document_ids)

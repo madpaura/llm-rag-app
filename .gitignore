@@ -67,6 +67,7 @@ htmlcov/
 # Documentation Build
 docs/_build/
 site/
+static/
 
 # Node (if frontend exists)
 node_modules/

@@ -30,11 +30,23 @@ class CodeIngestionService:
     5. Store in vector database with rich metadata
     """
     
-    def __init__(self):
+    def __init__(self, workspace_id: int = None):
+        self.workspace_id = workspace_id
         self.parser = CodeParserService()
-        self.vector_service = VectorService()
+        # VectorService is now workspace-isolated - lazy loaded
+        self._vector_service = None
         self.ollama_service = OllamaService()
         self.logger = structlog.get_logger()
+    
+    def _get_vector_service(self, workspace_id: int = None) -> VectorService:
+        """Get workspace-isolated vector service."""
+        ws_id = workspace_id or self.workspace_id
+        if ws_id is None:
+            raise ValueError("workspace_id is required for vector operations")
+        
+        if self._vector_service is None or self._vector_service.workspace_id != ws_id:
+            self._vector_service = VectorService(workspace_id=ws_id)
+        return self._vector_service
     
     async def ingest_code_directory(
         self,
@@ -450,7 +462,8 @@ Summary:"""
             })
         
         if documents:
-            await self.vector_service.add_documents(documents)
+            vector_service = self._get_vector_service(workspace_id)
+            await vector_service.add_documents(documents)
     
     async def ingest_code_files(
         self,

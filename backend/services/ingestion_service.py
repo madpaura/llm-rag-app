@@ -116,12 +116,17 @@ class TextChunker:
         return chunks
 
 class GitIngestionService:
-    """Service for ingesting Git repositories."""
+    """Service for ingesting Git repositories with workspace isolation."""
     
     def __init__(self):
-        self.clone_dir = Path(settings.GIT_CLONE_DIR)
-        self.clone_dir.mkdir(parents=True, exist_ok=True)
+        # Git repos are now workspace-isolated - clone_dir set per workspace
         self.chunker = TextChunker()
+    
+    def _get_workspace_git_dir(self, workspace_id: int) -> Path:
+        """Get workspace-isolated git repos directory."""
+        git_dir = Path(settings.DATA_BASE_DIR) / str(workspace_id) / "git_repos"
+        git_dir.mkdir(parents=True, exist_ok=True)
+        return git_dir
     
     # Language filter presets
     LANGUAGE_FILTERS = {
@@ -725,8 +730,8 @@ class DocumentIngestionService:
     
     def __init__(self, pdf_strategy: str = None):
         self.chunker = TextChunker()
-        self.upload_dir = Path(settings.UPLOAD_DIR)
-        self.upload_dir.mkdir(parents=True, exist_ok=True)
+        # Upload dir is now workspace-isolated - set per operation
+        self._upload_dir = None
         
         # Set PDF extraction strategy
         if pdf_strategy:
@@ -990,14 +995,26 @@ class IngestionOrchestrator:
     # C/C++ file extensions that should use AST-based code ingestion
     CODE_EXTENSIONS = {'.c', '.h', '.cpp', '.cc', '.cxx', '.hpp', '.hxx', '.hh'}
     
-    def __init__(self):
+    def __init__(self, workspace_id: int = None):
+        self.workspace_id = workspace_id
         self.git_service = GitIngestionService()
         self.confluence_service = ConfluenceIngestionService()
         self.jira_service = JiraIngestionService()
         self.document_service = DocumentIngestionService()
-        self.vector_service = VectorService()
+        # VectorService is now workspace-isolated
+        self._vector_service = None  # Lazy-loaded with workspace_id
         self.chunker = TextChunker()
         self._code_service = None  # Lazy-loaded
+    
+    def _get_vector_service(self, workspace_id: int = None) -> VectorService:
+        """Get workspace-isolated vector service."""
+        ws_id = workspace_id or self.workspace_id
+        if ws_id is None:
+            raise ValueError("workspace_id is required for vector operations")
+        
+        if self._vector_service is None or self._vector_service.workspace_id != ws_id:
+            self._vector_service = VectorService(workspace_id=ws_id)
+        return self._vector_service
     
     def _get_code_service(self):
         """Lazy-load CodeIngestionService to avoid circular imports."""
@@ -1242,7 +1259,8 @@ class IngestionOrchestrator:
                     if progress_callback:
                         progress_callback(data_source_id, "Creating Embeddings", 3, 4, i, len(all_chunks), f"Embedding batch {batch_num}/{total_batches}...")
                     
-                    success = await self.vector_service.add_documents(batch)
+                    vector_service = self._get_vector_service(documents[0]['workspace_id'] if documents else None)
+                    success = await vector_service.add_documents(batch)
                     if not success:
                         logger.error(f"Failed to add batch {batch_num} to vector store")
                     else:
