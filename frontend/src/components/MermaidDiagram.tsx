@@ -38,13 +38,26 @@ mermaid.initialize({
 });
 
 /**
- * Sanitize mermaid chart to handle special characters in node labels.
- * Mermaid interprets () as stadium shape, so we need to quote labels containing special chars.
+ * Sanitize mermaid chart to handle special characters and LLM artifacts.
+ * - Removes source citations like 【Source 1】 or [Source 1] that LLMs add
+ * - Handles special characters in node labels
  */
 function sanitizeMermaidChart(chart: string): string {
-  // Match node definitions like A[Label with special chars] or B{Decision?}
-  // and ensure labels with problematic characters are properly quoted
-  return chart.replace(
+  // First, remove LLM source citations that break mermaid parsing
+  let sanitized = chart
+    // Remove Chinese bracket citations: 【Source 1】, 【Source 2】
+    .replace(/【[^】]*】/g, '')
+    // Remove bracket citations: [Source 1], [Source 2]  
+    .replace(/\[Source\s*\d+\]/gi, '')
+    // Remove parenthesis citations: (Source 1)
+    .replace(/\(Source\s*\d+\)/gi, '')
+    // Clean up any double spaces left behind
+    .replace(/  +/g, ' ')
+    // Clean up empty lines
+    .replace(/^\s*[\r\n]/gm, '\n');
+
+  // Handle special characters in flowchart node labels
+  sanitized = sanitized.replace(
     /(\w+)\[([^\]]*)\]/g,
     (match, nodeId, label) => {
       // If label contains parentheses or other special chars, wrap in quotes
@@ -66,6 +79,8 @@ function sanitizeMermaidChart(chart: string): string {
       return match;
     }
   );
+  
+  return sanitized;
 }
 
 interface MermaidDiagramProps {

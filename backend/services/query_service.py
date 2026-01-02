@@ -89,7 +89,13 @@ IMPORTANT: When formatting your response:
   |---------|---------|
   | Cell1   | Cell2   |
 - Use bullet points for lists
-- Use **bold** for emphasis"""
+- Use **bold** for emphasis
+
+CRITICAL: When generating code blocks, mermaid diagrams, or any technical syntax:
+- NEVER include source citations like [Source 1], 【Source 1】, or (Source 1) inside code blocks
+- Keep all code blocks clean and syntactically valid
+- Place source citations ONLY in prose text, outside of code blocks
+- For mermaid sequence diagrams, ensure all lines have proper arrow syntax (->>, -->>, ->, -->)"""
         
         if context:
             full_prompt = f"{system_prompt}\n\nContext:\n{context}\n\nQuestion: {prompt}\n\nAnswer:"
@@ -128,7 +134,13 @@ IMPORTANT: When formatting your response:
   |---------|---------|
   | Cell1   | Cell2   |
 - Use bullet points for lists
-- Use **bold** for emphasis"""
+- Use **bold** for emphasis
+
+CRITICAL: When generating code blocks, mermaid diagrams, or any technical syntax:
+- NEVER include source citations like [Source 1], 【Source 1】, or (Source 1) inside code blocks
+- Keep all code blocks clean and syntactically valid
+- Place source citations ONLY in prose text, outside of code blocks
+- For mermaid sequence diagrams, ensure all lines have proper arrow syntax (->>, -->>, ->, -->)"""
             }
         ]
         
