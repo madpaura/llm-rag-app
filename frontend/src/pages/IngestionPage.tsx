@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { ArrowLeft, GitBranch, Globe, Upload, Loader2, CheckCircle, XCircle, Clock, Code, FileCode, Ticket } from 'lucide-react';
+import { ArrowLeft, GitBranch, Globe, Upload, Loader2, CheckCircle, XCircle, Clock, Code, FileCode, Ticket, RotateCcw, X } from 'lucide-react';
 import { api, DataSource, Workspace, CodeIngestionStats } from '../services/api';
+import { useFormCache } from '../hooks/useFormCache';
 
 // Progress tracking interface
 interface IngestionProgress {
@@ -31,8 +32,8 @@ export function IngestionPage() {
   const [activeDataSourceId, setActiveDataSourceId] = useState<number | null>(null);
   const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Git form state
-  const [gitForm, setGitForm] = useState({
+  // Git form state with caching (token excluded from cache)
+  const [gitForm, setGitForm, clearGitCache] = useFormCache('git_ingestion', {
     name: '',
     repo_url: '',
     branch: 'main',
@@ -40,7 +41,7 @@ export function IngestionPage() {
     token: '',
     language_filter: 'all',
     max_depth: '' as string | number
-  });
+  }, ['token']);
 
   // Language filter options
   const LANGUAGE_OPTIONS = [
@@ -54,8 +55,8 @@ export function IngestionPage() {
     { value: 'docs', label: 'Documentation Only', description: '.md, .txt, .rst' },
   ];
 
-  // Confluence form state
-  const [confluenceForm, setConfluenceForm] = useState({
+  // Confluence form state with caching (api_token excluded from cache)
+  const [confluenceForm, setConfluenceForm, clearConfluenceCache] = useFormCache('confluence_ingestion', {
     name: '',
     space_key: '',
     base_url: '',
@@ -64,10 +65,10 @@ export function IngestionPage() {
     page_ids: '',
     max_depth: '' as string | number,
     include_children: true
-  });
+  }, ['api_token']);
 
-  // JIRA form state
-  const [jiraForm, setJiraForm] = useState({
+  // JIRA form state with caching (api_token excluded from cache)
+  const [jiraForm, setJiraForm, clearJiraCache] = useFormCache('jira_ingestion', {
     name: '',
     project_key: '',
     base_url: '',
@@ -76,7 +77,7 @@ export function IngestionPage() {
     issue_types: [] as string[],
     specific_tickets: '',
     max_results: '' as string | number
-  });
+  }, ['api_token']);
 
   // JIRA issue type options
   const JIRA_ISSUE_TYPES = [
@@ -95,19 +96,21 @@ export function IngestionPage() {
   });
   const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number } | null>(null);
 
-  // Code form state
-  const [codeForm, setCodeForm] = useState({
+  // Code form state with caching (files excluded automatically)
+  const [codeForm, setCodeForm, clearCodeCache] = useFormCache('code_ingestion', {
     name: '',
     files: [] as File[],
     directoryPath: '',
     maxDepth: '' as string | number,
     includeHeaders: true
-  });
+  }, []);
   const [codeStats, setCodeStats] = useState<CodeIngestionStats | null>(null);
 
   useEffect(() => {
     if (workspaceId) {
       loadWorkspaceData();
+      // Check for active ingestions when page loads
+      checkActiveIngestions();
     }
     
     // Cleanup progress polling on unmount
@@ -117,6 +120,47 @@ export function IngestionPage() {
       }
     };
   }, [workspaceId]);
+
+  // Check for active ingestions and resume progress tracking
+  const checkActiveIngestions = async () => {
+    try {
+      const wsId = parseInt(workspaceId!);
+      const activeIngestions = await api.getActiveIngestions(wsId);
+      
+      if (activeIngestions.length > 0) {
+        // Resume tracking the first active ingestion
+        const active = activeIngestions[0];
+        setLoading(true);
+        if (active.progress) {
+          setIngestionProgress({
+            data_source_id: active.data_source_id,
+            status: active.status,
+            in_progress: active.in_progress,
+            ...active.progress
+          });
+        }
+        startProgressPolling(active.data_source_id);
+      }
+    } catch (err) {
+      console.error('Error checking active ingestions:', err);
+    }
+  };
+
+  // Cancel ingestion
+  const handleCancelIngestion = async () => {
+    if (!activeDataSourceId) return;
+    
+    try {
+      await api.cancelIngestion(activeDataSourceId);
+      stopProgressPolling();
+      setLoading(false);
+      setSuccess('Ingestion cancelled');
+      loadWorkspaceData();
+    } catch (err) {
+      console.error('Error cancelling ingestion:', err);
+      setError('Failed to cancel ingestion');
+    }
+  };
 
   // Start polling for progress
   const startProgressPolling = (dataSourceId: number) => {
@@ -662,9 +706,20 @@ export function IngestionPage() {
                       <span className="text-sm font-medium text-blue-800">
                         {ingestionProgress?.stage || 'Starting...'}
                       </span>
-                      <span className="text-sm text-blue-600">
-                        Stage {ingestionProgress?.stage_num || 1}/{ingestionProgress?.total_stages || 4}
-                      </span>
+                      <div className="flex items-center gap-3">
+                        <span className="text-sm text-blue-600">
+                          Stage {ingestionProgress?.stage_num || 1}/{ingestionProgress?.total_stages || 4}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={handleCancelIngestion}
+                          className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-red-600 hover:text-red-700 hover:bg-red-100 rounded transition-colors"
+                          title="Cancel ingestion"
+                        >
+                          <X className="h-3 w-3" />
+                          Cancel
+                        </button>
+                      </div>
                     </div>
                     
                     {/* Stage Progress Bar */}
@@ -727,18 +782,31 @@ export function IngestionPage() {
                   </div>
                 )}
 
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="w-full flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 disabled:opacity-50"
-                >
-                  {loading ? (
-                    <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                  ) : (
-                    <GitBranch className="h-4 w-4 mr-2" />
-                  )}
-                  {loading ? 'Ingesting...' : 'Ingest Repository'}
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="flex-1 flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 disabled:opacity-50"
+                  >
+                    {loading ? (
+                      <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                    ) : (
+                      <GitBranch className="h-4 w-4 mr-2" />
+                    )}
+                    {loading ? 'Ingesting...' : 'Ingest Repository'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearGitCache();
+                      setGitForm({ name: '', repo_url: '', branch: 'main', username: '', token: '', language_filter: 'all', max_depth: '' });
+                    }}
+                    className="px-3 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500"
+                    title="Clear cached form data"
+                  >
+                    <RotateCcw className="h-4 w-4" />
+                  </button>
+                </div>
               </form>
             </div>
           )}
@@ -862,18 +930,31 @@ export function IngestionPage() {
                   </div>
                 </div>
 
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="w-full flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 disabled:opacity-50"
-                >
-                  {loading ? (
-                    <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                  ) : (
-                    <Globe className="h-4 w-4 mr-2" />
-                  )}
-                  Ingest Space
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="flex-1 flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 disabled:opacity-50"
+                  >
+                    {loading ? (
+                      <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                    ) : (
+                      <Globe className="h-4 w-4 mr-2" />
+                    )}
+                    Ingest Space
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearConfluenceCache();
+                      setConfluenceForm({ name: '', space_key: '', base_url: '', username: '', api_token: '', page_ids: '', max_depth: '', include_children: true });
+                    }}
+                    className="px-3 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500"
+                    title="Clear cached form data"
+                  >
+                    <RotateCcw className="h-4 w-4" />
+                  </button>
+                </div>
               </form>
             </div>
           )}
@@ -1012,9 +1093,20 @@ export function IngestionPage() {
                       <span className="text-sm font-medium text-blue-800">
                         {ingestionProgress.stage || 'Starting...'}
                       </span>
-                      <span className="text-sm text-blue-600">
-                        Stage {ingestionProgress.stage_num || 1}/{ingestionProgress.total_stages || 4}
-                      </span>
+                      <div className="flex items-center gap-3">
+                        <span className="text-sm text-blue-600">
+                          Stage {ingestionProgress.stage_num || 1}/{ingestionProgress.total_stages || 4}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={handleCancelIngestion}
+                          className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-red-600 hover:text-red-700 hover:bg-red-100 rounded transition-colors"
+                          title="Cancel ingestion"
+                        >
+                          <X className="h-3 w-3" />
+                          Cancel
+                        </button>
+                      </div>
                     </div>
                     <div className="w-full bg-blue-200 rounded-full h-2">
                       <div
@@ -1030,18 +1122,31 @@ export function IngestionPage() {
                   </div>
                 )}
 
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="w-full flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 disabled:opacity-50"
-                >
-                  {loading ? (
-                    <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                  ) : (
-                    <Ticket className="h-4 w-4 mr-2" />
-                  )}
-                  {loading ? 'Ingesting...' : 'Ingest JIRA Issues'}
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="flex-1 flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 disabled:opacity-50"
+                  >
+                    {loading ? (
+                      <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                    ) : (
+                      <Ticket className="h-4 w-4 mr-2" />
+                    )}
+                    {loading ? 'Ingesting...' : 'Ingest JIRA Issues'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearJiraCache();
+                      setJiraForm({ name: '', project_key: '', base_url: '', username: '', api_token: '', issue_types: [], specific_tickets: '', max_results: '' });
+                    }}
+                    className="px-3 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500"
+                    title="Clear cached form data"
+                  >
+                    <RotateCcw className="h-4 w-4" />
+                  </button>
+                </div>
               </form>
             </div>
           )}
@@ -1251,23 +1356,36 @@ export function IngestionPage() {
                   </div>
                 )}
 
-                <button
-                  type="submit"
-                  disabled={loading || (codeForm.files.length === 0 && !codeForm.directoryPath)}
-                  className="w-full flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 disabled:opacity-50"
-                >
-                  {loading ? (
-                    <>
-                      <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                      Processing (this may take a while)...
-                    </>
-                  ) : (
-                    <>
-                      <Code className="h-4 w-4 mr-2" />
-                      {codeForm.directoryPath ? 'Ingest Directory' : `Ingest ${codeForm.files.length} Code File${codeForm.files.length !== 1 ? 's' : ''}`}
-                    </>
-                  )}
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    type="submit"
+                    disabled={loading || (codeForm.files.length === 0 && !codeForm.directoryPath)}
+                    className="flex-1 flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 disabled:opacity-50"
+                  >
+                    {loading ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                        Processing (this may take a while)...
+                      </>
+                    ) : (
+                      <>
+                        <Code className="h-4 w-4 mr-2" />
+                        {codeForm.directoryPath ? 'Ingest Directory' : `Ingest ${codeForm.files.length} Code File${codeForm.files.length !== 1 ? 's' : ''}`}
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearCodeCache();
+                      setCodeForm({ name: '', files: [], directoryPath: '', maxDepth: '', includeHeaders: true });
+                    }}
+                    className="px-3 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500"
+                    title="Clear cached form data"
+                  >
+                    <RotateCcw className="h-4 w-4" />
+                  </button>
+                </div>
               </form>
 
               <div className="mt-6 p-4 bg-blue-50 rounded-md">

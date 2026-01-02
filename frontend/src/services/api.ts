@@ -302,6 +302,35 @@ export const api = {
     return response.data;
   },
 
+  async cancelIngestion(dataSourceId: number): Promise<{
+    success: boolean;
+    data_source_id: number;
+    message: string;
+  }> {
+    const response = await apiClient.post(`/api/ingestion/cancel/${dataSourceId}`);
+    return response.data;
+  },
+
+  async getActiveIngestions(workspaceId: number): Promise<Array<{
+    data_source_id: number;
+    name: string;
+    source_type: string;
+    status: string;
+    in_progress: boolean;
+    progress: {
+      stage: string;
+      stage_num: number;
+      total_stages: number;
+      current: number;
+      total: number;
+      percent: number;
+      message: string;
+    } | null;
+  }>> {
+    const response = await apiClient.get(`/api/ingestion/active/${workspaceId}`);
+    return response.data;
+  },
+
   async ingestConfluenceSpace(data: {
     workspace_id: number;
     name: string;

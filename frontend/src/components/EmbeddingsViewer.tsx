@@ -21,6 +21,7 @@ interface EmbeddingDocument {
   file_path: string;
   file_type: string;
   chunk_count: number;
+  chunk_type: 'code_units' | 'text_chunks';
   data_source_id: number;
   data_source_name: string;
   created_at: string;
@@ -29,10 +30,17 @@ interface EmbeddingDocument {
 interface EmbeddingChunk {
   id: number;
   chunk_index: number;
+  chunk_type: 'code_unit' | 'text_chunk';
   content: string;
   start_line?: number;
   end_line?: number;
   metadata: Record<string, any>;
+  // Code unit specific fields
+  unit_type?: string;
+  name?: string;
+  signature?: string;
+  summary?: string;
+  language?: string;
 }
 
 interface GroupedDocuments {
@@ -50,6 +58,10 @@ export function EmbeddingsViewer() {
   const [loadingChunks, setLoadingChunks] = useState(false);
   const [expandedSources, setExpandedSources] = useState<Set<string>>(new Set());
   const [fileTypeFilter, setFileTypeFilter] = useState<string>('all');
+  
+  // Pagination for large document lists
+  const [visibleCount, setVisibleCount] = useState(50);
+  const LOAD_MORE_COUNT = 50;
 
   useEffect(() => {
     if (workspaceId) {
@@ -63,9 +75,11 @@ export function EmbeddingsViewer() {
       setError('');
       const data = await api.getWorkspaceEmbeddings(parseInt(workspaceId!));
       setDocuments(data);
-      // Auto-expand all sources
-      const sources = new Set<string>(data.map((d: EmbeddingDocument) => d.data_source_name));
-      setExpandedSources(sources);
+      // Don't auto-expand for large datasets - expand only first source
+      const sources = Array.from(new Set<string>(data.map((d: EmbeddingDocument) => d.data_source_name)));
+      if (sources.length > 0) {
+        setExpandedSources(new Set([sources[0]]));
+      }
     } catch (err) {
       setError('Failed to load embeddings');
       console.error('Error loading embeddings:', err);
@@ -193,6 +207,23 @@ export function EmbeddingsViewer() {
               ))}
             </select>
           </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => {
+                const allSources = Object.keys(groupedDocuments);
+                setExpandedSources(new Set(allSources));
+              }}
+              className="flex-1 text-xs py-1 px-2 text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded border border-gray-200"
+            >
+              Expand All
+            </button>
+            <button
+              onClick={() => setExpandedSources(new Set())}
+              className="flex-1 text-xs py-1 px-2 text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded border border-gray-200"
+            >
+              Collapse All
+            </button>
+          </div>
         </div>
 
         {/* Document Tree */}
@@ -220,10 +251,10 @@ export function EmbeddingsViewer() {
                   </span>
                 </button>
 
-                {/* Documents */}
+                {/* Documents - with lazy loading for large lists */}
                 {expandedSources.has(sourceName) && (
                   <div className="ml-4 space-y-0.5">
-                    {docs.map(doc => (
+                    {docs.slice(0, visibleCount).map(doc => (
                       <button
                         key={doc.id}
                         onClick={() => loadChunks(doc)}
@@ -241,6 +272,14 @@ export function EmbeddingsViewer() {
                         </span>
                       </button>
                     ))}
+                    {docs.length > visibleCount && (
+                      <button
+                        onClick={() => setVisibleCount(prev => prev + LOAD_MORE_COUNT)}
+                        className="w-full py-2 text-xs text-primary-600 hover:text-primary-700 hover:bg-primary-50 rounded"
+                      >
+                        Load more ({docs.length - visibleCount} remaining)
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -260,13 +299,22 @@ export function EmbeddingsViewer() {
                 <h3 className="font-medium text-gray-900 truncate">
                   {selectedDocument.title || selectedDocument.file_path}
                 </h3>
+                {selectedDocument.chunk_type === 'code_units' && (
+                  <span className="px-2 py-0.5 bg-green-100 text-green-700 text-xs rounded font-medium">
+                    AST Parsed
+                  </span>
+                )}
               </div>
               <p className="text-sm text-gray-600 mt-1">
                 {selectedDocument.file_path}
               </p>
               <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
                 <span>Type: {selectedDocument.file_type}</span>
-                <span>Chunks: {selectedDocument.chunk_count}</span>
+                <span>
+                  {selectedDocument.chunk_type === 'code_units' 
+                    ? `Code Units: ${selectedDocument.chunk_count}` 
+                    : `Chunks: ${selectedDocument.chunk_count}`}
+                </span>
               </div>
             </div>
 
@@ -290,9 +338,28 @@ export function EmbeddingsViewer() {
                       {/* Chunk Header */}
                       <div className="bg-gray-50 px-4 py-2 flex items-center justify-between border-b border-gray-200">
                         <div className="flex items-center gap-3">
-                          <span className="text-sm font-medium text-gray-700">
-                            Chunk {chunk.chunk_index + 1}
-                          </span>
+                          {chunk.chunk_type === 'code_unit' ? (
+                            <>
+                              <span className={`text-xs px-2 py-0.5 rounded font-medium ${
+                                chunk.unit_type === 'function' || chunk.unit_type === 'method' 
+                                  ? 'bg-green-100 text-green-700'
+                                  : chunk.unit_type === 'class' 
+                                  ? 'bg-blue-100 text-blue-700'
+                                  : chunk.unit_type === 'struct'
+                                  ? 'bg-purple-100 text-purple-700'
+                                  : 'bg-gray-100 text-gray-700'
+                              }`}>
+                                {chunk.unit_type}
+                              </span>
+                              <span className="text-sm font-medium text-gray-700">
+                                {chunk.name || `Unit ${chunk.chunk_index + 1}`}
+                              </span>
+                            </>
+                          ) : (
+                            <span className="text-sm font-medium text-gray-700">
+                              Chunk {chunk.chunk_index + 1}
+                            </span>
+                          )}
                           {chunk.start_line && chunk.end_line && (
                             <span className="text-xs text-gray-500 bg-gray-100 px-2 py-0.5 rounded">
                               Lines {chunk.start_line}-{chunk.end_line}
@@ -303,6 +370,22 @@ export function EmbeddingsViewer() {
                           {chunk.content.length} chars
                         </span>
                       </div>
+
+                      {/* Signature for code units */}
+                      {chunk.chunk_type === 'code_unit' && chunk.signature && (
+                        <div className="px-4 py-2 bg-gray-100 border-b border-gray-200">
+                          <code className="text-sm text-gray-800 font-mono">{chunk.signature}</code>
+                        </div>
+                      )}
+
+                      {/* Summary for code units */}
+                      {chunk.chunk_type === 'code_unit' && chunk.summary && (
+                        <div className="px-4 py-3 bg-blue-50 border-b border-blue-100">
+                          <p className="text-sm text-blue-800">
+                            <strong className="text-blue-900">Summary:</strong> {chunk.summary}
+                          </p>
+                        </div>
+                      )}
 
                       {/* Chunk Content */}
                       <div className="p-4">

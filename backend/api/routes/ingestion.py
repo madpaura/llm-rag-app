@@ -26,6 +26,9 @@ settings = get_settings()
 # In-memory progress tracking store
 _ingestion_progress: Dict[int, Dict[str, Any]] = {}
 
+# In-memory cancellation flag store
+_cancellation_flags: Dict[int, bool] = {}
+
 def update_progress(data_source_id: int, stage: str, stage_num: int, total_stages: int,
                    current: int = 0, total: int = 0, message: str = ""):
     """Update ingestion progress for a data source."""
@@ -49,6 +52,17 @@ def clear_progress(data_source_id: int):
     """Clear progress tracking for a data source."""
     if data_source_id in _ingestion_progress:
         del _ingestion_progress[data_source_id]
+    if data_source_id in _cancellation_flags:
+        del _cancellation_flags[data_source_id]
+
+def request_cancellation(data_source_id: int):
+    """Request cancellation of an ingestion job."""
+    _cancellation_flags[data_source_id] = True
+    logger.info(f"[CANCEL] Cancellation requested for data source {data_source_id}")
+
+def is_cancelled(data_source_id: int) -> bool:
+    """Check if cancellation has been requested for a data source."""
+    return _cancellation_flags.get(data_source_id, False)
 
 class GitIngestionRequest(BaseModel):
     workspace_id: int
@@ -166,6 +180,72 @@ async def get_ingestion_progress(
             "percent": 100 if data_source.status == "completed" else 0,
             "message": ""
         }
+
+@router.post("/cancel/{data_source_id}")
+async def cancel_ingestion(
+    data_source_id: int,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Cancel an ongoing ingestion job."""
+    # Check if data source exists
+    data_source = db.query(DataSource).filter(DataSource.id == data_source_id).first()
+    if not data_source:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Data source not found"
+        )
+    
+    # Check if ingestion is in progress
+    progress = get_progress(data_source_id)
+    if not progress and data_source.status not in ["pending", "processing"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active ingestion to cancel"
+        )
+    
+    # Request cancellation
+    request_cancellation(data_source_id)
+    
+    # Update status to cancelled
+    data_source.status = "cancelled"
+    db.commit()
+    
+    # Update progress to show cancellation
+    update_progress(data_source_id, "Cancelled", 0, 4, 0, 0, "Ingestion cancelled by user")
+    
+    return {
+        "success": True,
+        "data_source_id": data_source_id,
+        "message": "Ingestion cancellation requested"
+    }
+
+@router.get("/active/{workspace_id}")
+async def get_active_ingestions(
+    workspace_id: int,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Get all active/in-progress ingestion jobs for a workspace."""
+    # Get data sources that are processing
+    active_sources = db.query(DataSource).filter(
+        DataSource.workspace_id == workspace_id,
+        DataSource.status.in_(["pending", "processing"])
+    ).all()
+    
+    result = []
+    for source in active_sources:
+        progress = get_progress(source.id)
+        result.append({
+            "data_source_id": source.id,
+            "name": source.name,
+            "source_type": source.source_type,
+            "status": source.status,
+            "in_progress": progress is not None,
+            "progress": progress
+        })
+    
+    return result
 
 @router.post("/git")
 async def ingest_git_repository(

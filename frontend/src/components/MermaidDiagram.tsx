@@ -37,6 +37,37 @@ mermaid.initialize({
   },
 });
 
+/**
+ * Sanitize mermaid chart to handle special characters in node labels.
+ * Mermaid interprets () as stadium shape, so we need to quote labels containing special chars.
+ */
+function sanitizeMermaidChart(chart: string): string {
+  // Match node definitions like A[Label with special chars] or B{Decision?}
+  // and ensure labels with problematic characters are properly quoted
+  return chart.replace(
+    /(\w+)\[([^\]]*)\]/g,
+    (match, nodeId, label) => {
+      // If label contains parentheses or other special chars, wrap in quotes
+      if (/[(){}|<>]/.test(label)) {
+        // Escape any existing quotes in the label
+        const escapedLabel = label.replace(/"/g, '#quot;');
+        return `${nodeId}["${escapedLabel}"]`;
+      }
+      return match;
+    }
+  ).replace(
+    /(\w+)\{([^}]*)\}/g,
+    (match, nodeId, label) => {
+      // Same for diamond/decision nodes
+      if (/[()[\]|<>]/.test(label)) {
+        const escapedLabel = label.replace(/"/g, '#quot;');
+        return `${nodeId}{"${escapedLabel}"}`;
+      }
+      return match;
+    }
+  );
+}
+
 interface MermaidDiagramProps {
   chart: string;
 }
@@ -61,8 +92,11 @@ export function MermaidDiagram({ chart }: MermaidDiagramProps) {
         // Generate unique ID for this diagram
         const id = `mermaid-${Math.random().toString(36).substr(2, 9)}`;
         
+        // Sanitize the chart to handle special characters in labels
+        const sanitizedChart = sanitizeMermaidChart(chart.trim());
+        
         // Render the mermaid diagram
-        const { svg: renderedSvg } = await mermaid.render(id, chart.trim());
+        const { svg: renderedSvg } = await mermaid.render(id, sanitizedChart);
         setSvg(renderedSvg);
         setError(null);
       } catch (err) {

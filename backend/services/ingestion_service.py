@@ -28,6 +28,15 @@ except ImportError:
 
 from sqlalchemy import func
 
+# Import cancellation check from ingestion routes
+def _check_cancelled(data_source_id: int) -> bool:
+    """Check if ingestion has been cancelled. Import dynamically to avoid circular imports."""
+    try:
+        from api.routes.ingestion import is_cancelled
+        return is_cancelled(data_source_id)
+    except ImportError:
+        return False
+
 from core.config import get_settings
 from core.database import get_db, DataSource, Document, DocumentChunk
 from services.vector_service import VectorService
@@ -978,6 +987,9 @@ class DocumentIngestionService:
 class IngestionOrchestrator:
     """Main ingestion service that coordinates all ingestion types."""
     
+    # C/C++ file extensions that should use AST-based code ingestion
+    CODE_EXTENSIONS = {'.c', '.h', '.cpp', '.cc', '.cxx', '.hpp', '.hxx', '.hh'}
+    
     def __init__(self):
         self.git_service = GitIngestionService()
         self.confluence_service = ConfluenceIngestionService()
@@ -985,6 +997,14 @@ class IngestionOrchestrator:
         self.document_service = DocumentIngestionService()
         self.vector_service = VectorService()
         self.chunker = TextChunker()
+        self._code_service = None  # Lazy-loaded
+    
+    def _get_code_service(self):
+        """Lazy-load CodeIngestionService to avoid circular imports."""
+        if self._code_service is None:
+            from services.code_ingestion_service import CodeIngestionService
+            self._code_service = CodeIngestionService()
+        return self._code_service
     
     async def ingest_data_source(self, data_source_id: int, progress_callback=None) -> Dict[str, Any]:
         """Ingest data from a data source."""
@@ -995,6 +1015,11 @@ class IngestionOrchestrator:
             
             if not data_source:
                 return {"success": False, "error": "Data source not found"}
+            
+            # Check for cancellation before starting
+            if _check_cancelled(data_source_id):
+                logger.info(f"[CANCELLED] Ingestion cancelled before start for data source {data_source_id}")
+                return {"success": False, "error": "Ingestion cancelled", "cancelled": True}
             
             # Update status to processing
             data_source.status = "processing"
@@ -1083,22 +1108,76 @@ class IngestionOrchestrator:
     async def _process_documents(self, documents: List[Dict[str, Any]], 
                                data_source_id: int, db,
                                progress_callback=None) -> None:
-        """Process documents: chunk, embed, and store."""
+        """Process documents: chunk, embed, and store.
+        
+        For C/C++ code files, uses AST-based semantic chunking with function/class
+        extraction and LLM-generated summaries. For other files, uses simple text chunking.
+        """
         try:
             all_chunks = []
             total_docs = len(documents)
             
-            logger.info(f"[STAGE 2/4] Starting document processing for {total_docs} documents")
-            if progress_callback:
-                progress_callback(data_source_id, "Processing Documents", 2, 4, 0, total_docs, "Chunking files...")
+            # Separate code files from other documents
+            code_files = []
+            other_docs = []
             
-            for idx, doc_data in enumerate(documents):
-                doc_title = doc_data['title'][:50] if doc_data['title'] else 'Unknown'
-                logger.info(f"[DOC {idx+1}/{total_docs}] Processing: {doc_title}")
+            for doc_data in documents:
+                file_type = doc_data.get('file_type', '').lower()
+                if file_type in self.CODE_EXTENSIONS:
+                    code_files.append(doc_data)
+                else:
+                    other_docs.append(doc_data)
+            
+            logger.info(f"[STAGE 2/4] Starting document processing for {total_docs} documents "
+                       f"({len(code_files)} code files, {len(other_docs)} other files)")
+            
+            if progress_callback:
+                progress_callback(data_source_id, "Processing Documents", 2, 4, 0, total_docs, "Analyzing files...")
+            
+            # Process code files with AST-based semantic chunking
+            if code_files:
+                logger.info(f"[CODE] Processing {len(code_files)} C/C++ files with AST-based semantic chunking...")
+                if progress_callback:
+                    progress_callback(data_source_id, "Processing Code", 2, 4, 0, len(code_files), 
+                                    "Parsing code with AST analysis...")
                 
-                # Update progress every 5 documents
-                if progress_callback and (idx % 5 == 0 or idx == total_docs - 1):
-                    progress_callback(data_source_id, "Processing Documents", 2, 4, idx + 1, total_docs, f"Processing: {doc_title}")
+                code_service = self._get_code_service()
+                workspace_id = code_files[0]['workspace_id']
+                
+                # Prepare files for code ingestion service
+                files_for_code_service = [
+                    {"path": doc['file_path'], "content": doc['content']}
+                    for doc in code_files
+                ]
+                
+                try:
+                    # Use CodeIngestionService for semantic code processing
+                    code_stats = await code_service.ingest_code_files(
+                        files=files_for_code_service,
+                        workspace_id=workspace_id,
+                        data_source_id=data_source_id,
+                        db=db
+                    )
+                    logger.info(f"[CODE] AST processing complete: {code_stats}")
+                except Exception as e:
+                    logger.warning(f"[CODE] AST processing failed, falling back to simple chunking: {e}")
+                    # Fallback: process code files as regular documents
+                    other_docs.extend(code_files)
+            
+            # Process non-code documents with simple text chunking
+            for idx, doc_data in enumerate(other_docs):
+                # Check for cancellation
+                if _check_cancelled(data_source_id):
+                    logger.info(f"[CANCELLED] Ingestion cancelled during document processing for data source {data_source_id}")
+                    raise Exception("Ingestion cancelled by user")
+                
+                doc_title = doc_data['title'][:50] if doc_data['title'] else 'Unknown'
+                logger.info(f"[DOC {idx+1}/{len(other_docs)}] Processing: {doc_title}")
+                
+                # Update progress
+                if progress_callback and (idx % 5 == 0 or idx == len(other_docs) - 1):
+                    progress_callback(data_source_id, "Processing Documents", 2, 4, 
+                                    len(code_files) + idx + 1, total_docs, f"Processing: {doc_title}")
                 
                 # Create document record
                 document = Document(
@@ -1112,10 +1191,10 @@ class IngestionOrchestrator:
                 db.add(document)
                 db.flush()  # Get the ID
                 
-                # Chunk the document
-                logger.debug(f"[DOC {idx+1}/{total_docs}] Chunking document...")
+                # Chunk the document with simple text chunking
+                logger.debug(f"[DOC {idx+1}/{len(other_docs)}] Chunking document...")
                 chunks = self.chunker.chunk_text(doc_data['content'], doc_data.get('metadata', {}))
-                logger.info(f"[DOC {idx+1}/{total_docs}] Created {len(chunks)} chunks")
+                logger.info(f"[DOC {idx+1}/{len(other_docs)}] Created {len(chunks)} chunks")
                 
                 for chunk_data in chunks:
                     chunk = DocumentChunk(
@@ -1141,7 +1220,7 @@ class IngestionOrchestrator:
                 
                 # Report progress every 10 documents
                 if (idx + 1) % 10 == 0:
-                    logger.info(f"[PROGRESS] Processed {idx+1}/{total_docs} documents ({len(all_chunks)} chunks so far)")
+                    logger.info(f"[PROGRESS] Processed {idx+1}/{len(other_docs)} non-code documents ({len(all_chunks)} chunks so far)")
             
             logger.info(f"[STAGE 3/4] Document processing complete. Total chunks: {len(all_chunks)}")
             if progress_callback:

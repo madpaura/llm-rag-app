@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 import structlog
 
-from core.database import get_db, DataSource, Document, DocumentChunk, Workspace
+from core.database import get_db, DataSource, Document, DocumentChunk, Workspace, CodeUnit
 
 logger = structlog.get_logger()
 router = APIRouter()
@@ -20,7 +20,10 @@ async def get_workspace_embeddings(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)
 ) -> List[Dict[str, Any]]:
-    """Get all documents with embedding info for a workspace."""
+    """Get all documents with embedding info for a workspace.
+    
+    For code files (C/C++), shows code units (functions, classes, files) instead of simple chunks.
+    """
     try:
         # Verify workspace exists
         workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
@@ -48,17 +51,26 @@ async def get_workspace_embeddings(
         
         result = []
         for doc in documents:
-            # Count chunks for this document
+            # Check if this is a code file with code units
+            code_unit_count = db.query(CodeUnit).filter(
+                CodeUnit.document_id == doc.id
+            ).count()
+            
+            # Count regular chunks
             chunk_count = db.query(DocumentChunk).filter(
                 DocumentChunk.document_id == doc.id
             ).count()
+            
+            # Determine if this uses semantic code chunking
+            is_code_file = code_unit_count > 0
             
             result.append({
                 "id": doc.id,
                 "title": doc.title or doc.file_path,
                 "file_path": doc.file_path or "",
                 "file_type": doc.file_type or "unknown",
-                "chunk_count": chunk_count,
+                "chunk_count": code_unit_count if is_code_file else chunk_count,
+                "chunk_type": "code_units" if is_code_file else "text_chunks",
                 "data_source_id": doc.data_source_id,
                 "data_source_name": data_source_map.get(doc.data_source_id, "Unknown"),
                 "created_at": doc.created_at.isoformat() if doc.created_at else None
@@ -85,7 +97,11 @@ async def get_document_chunks(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)
 ) -> List[Dict[str, Any]]:
-    """Get all chunks for a document."""
+    """Get all chunks/code units for a document.
+    
+    For code files with AST-based parsing, returns code units (functions, classes, files)
+    with their summaries. For other files, returns simple text chunks.
+    """
     try:
         # Verify document exists
         document = db.query(Document).filter(Document.id == document_id).first()
@@ -95,7 +111,40 @@ async def get_document_chunks(
                 detail="Document not found"
             )
         
-        # Get all chunks for the document
+        # Check if this document has code units (AST-based parsing)
+        code_units = db.query(CodeUnit).filter(
+            CodeUnit.document_id == document_id
+        ).order_by(CodeUnit.start_line).all()
+        
+        if code_units:
+            # Return code units with summaries
+            result = []
+            for idx, unit in enumerate(code_units):
+                metadata = unit.unit_metadata or {}
+                result.append({
+                    "id": unit.id,
+                    "chunk_index": idx,
+                    "chunk_type": "code_unit",
+                    "unit_type": unit.unit_type,
+                    "name": unit.name,
+                    "signature": unit.signature,
+                    "content": unit.code,
+                    "summary": unit.summary,
+                    "start_line": unit.start_line,
+                    "end_line": unit.end_line,
+                    "language": unit.language,
+                    "metadata": {
+                        "unit_type": unit.unit_type,
+                        "name": unit.name,
+                        "signature": unit.signature,
+                        "language": unit.language,
+                        "parent_id": unit.parent_id,
+                        **metadata
+                    }
+                })
+            return result
+        
+        # Fall back to regular document chunks
         chunks = db.query(DocumentChunk).filter(
             DocumentChunk.document_id == document_id
         ).order_by(DocumentChunk.chunk_index).all()
@@ -106,6 +155,7 @@ async def get_document_chunks(
             result.append({
                 "id": chunk.id,
                 "chunk_index": chunk.chunk_index,
+                "chunk_type": "text_chunk",
                 "content": chunk.content,
                 "start_line": metadata.get("start_line"),
                 "end_line": metadata.get("end_line"),
