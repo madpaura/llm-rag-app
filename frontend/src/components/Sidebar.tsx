@@ -1,12 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Home, FolderOpen, Upload, MessageSquare, Plus } from 'lucide-react';
+import { Home, FolderOpen, Upload, MessageSquare, Plus, Settings, Layers } from 'lucide-react';
 import { api, Workspace } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
+import { useConfig } from '../contexts/ConfigContext';
 
 export function Sidebar() {
   const location = useLocation();
   const { user } = useAuth();
+  const { isFeatureEnabled } = useConfig();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -43,6 +45,18 @@ export function Sidebar() {
         >
           <Home className="h-5 w-5" />
           <span>Dashboard</span>
+        </Link>
+
+        <Link
+          to="/settings"
+          className={`flex items-center space-x-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+            isActive('/settings')
+              ? 'bg-primary-100 text-primary-700'
+              : 'text-gray-700 hover:bg-gray-100'
+          }`}
+        >
+          <Settings className="h-5 w-5" />
+          <span>Settings</span>
         </Link>
 
         {/* Workspaces Section */}
@@ -99,6 +113,20 @@ export function Sidebar() {
                         <Upload className="h-3 w-3" />
                         <span>Ingest Data</span>
                       </Link>
+                      {/* Embeddings Viewer - only visible when feature is enabled */}
+                      {isFeatureEnabled('embeddingsViewer') && (
+                        <Link
+                          to={`/workspace/${workspace.id}/embeddings`}
+                          className={`flex items-center space-x-2 px-3 py-1 rounded text-xs transition-colors ${
+                            isActive(`/workspace/${workspace.id}/embeddings`)
+                              ? 'bg-primary-50 text-primary-600'
+                              : 'text-gray-600 hover:bg-gray-50'
+                          }`}
+                        >
+                          <Layers className="h-3 w-3" />
+                          <span>Embeddings</span>
+                        </Link>
+                      )}
                     </div>
                   )}
                 </div>

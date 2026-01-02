@@ -256,28 +256,64 @@ class ConfluenceIngestionService:
     def __init__(self):
         self.chunker = TextChunker()
     
-    async def ingest_space(self, space_key: str, workspace_id: int, 
-                          base_url: str = None, username: str = None, 
-                          api_token: str = None) -> Dict[str, Any]:
-        """Ingest pages from a Confluence space."""
+    async def ingest_space(
+        self, 
+        space_key: str, 
+        workspace_id: int, 
+        base_url: str = None, 
+        username: str = None, 
+        api_token: str = None,
+        page_ids: List[str] = None,
+        max_depth: int = None,
+        include_children: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Ingest pages from a Confluence space.
+        
+        Args:
+            space_key: Confluence space key
+            workspace_id: Target workspace ID
+            base_url: Confluence base URL
+            username: Confluence username/email
+            api_token: Confluence API token
+            page_ids: Optional list of specific page IDs to ingest
+            max_depth: Max depth for child pages (None = all)
+            include_children: Whether to include child pages
+        """
         try:
-            base_url = base_url or settings.CONFLUENCE_BASE_URL
-            username = username or settings.CONFLUENCE_USERNAME
-            api_token = api_token or settings.CONFLUENCE_API_TOKEN
+            base_url = base_url or settings.CONFLUENCE_BASE_URL if hasattr(settings, 'CONFLUENCE_BASE_URL') else None
+            username = username or settings.CONFLUENCE_USERNAME if hasattr(settings, 'CONFLUENCE_USERNAME') else None
+            api_token = api_token or settings.CONFLUENCE_API_TOKEN if hasattr(settings, 'CONFLUENCE_API_TOKEN') else None
             
             if not all([base_url, username, api_token]):
                 return {"success": False, "error": "Missing Confluence credentials"}
             
-            logger.info(f"Starting Confluence ingestion for space {space_key}")
+            # Ensure base_url doesn't have trailing slash
+            base_url = base_url.rstrip('/')
+            
+            logger.info(f"Starting Confluence ingestion for space {space_key} (page_ids={page_ids}, max_depth={max_depth})")
             
             # Get pages from space
-            pages = await self._get_space_pages(base_url, space_key, username, api_token)
+            if page_ids:
+                # Fetch specific pages
+                pages = await self._get_specific_pages(base_url, page_ids, username, api_token)
+            else:
+                # Fetch all pages from space
+                pages = await self._get_space_pages(base_url, space_key, username, api_token, max_depth, include_children)
             
             documents = []
             for page in pages:
                 try:
                     content = await self._get_page_content(base_url, page['id'], username, api_token)
                     if content:
+                        # Extract additional metadata
+                        page_version = page.get('version', {}).get('number', 1)
+                        page_created = page.get('history', {}).get('createdDate', '')
+                        page_updated = page.get('version', {}).get('when', '')
+                        page_creator = page.get('history', {}).get('createdBy', {}).get('displayName', 'Unknown')
+                        page_modifier = page.get('version', {}).get('by', {}).get('displayName', 'Unknown')
+                        ancestors = [a.get('title', '') for a in page.get('ancestors', [])]
+                        
                         documents.append({
                             'title': page['title'],
                             'content': content,
@@ -288,6 +324,13 @@ class ConfluenceIngestionService:
                             'metadata': {
                                 'space_key': space_key,
                                 'page_id': page['id'],
+                                'page_title': page['title'],
+                                'page_version': page_version,
+                                'created': page_created,
+                                'updated': page_updated,
+                                'creator': page_creator,
+                                'last_modifier': page_modifier,
+                                'ancestors': ancestors,
                                 'page_url': f"{base_url}/pages/viewpage.action?pageId={page['id']}"
                             }
                         })
@@ -301,9 +344,16 @@ class ConfluenceIngestionService:
             logger.error(f"Error ingesting Confluence space: {e}")
             return {"success": False, "error": str(e)}
     
-    async def _get_space_pages(self, base_url: str, space_key: str, 
-                              username: str, api_token: str) -> List[Dict[str, Any]]:
-        """Get all pages from a Confluence space."""
+    async def _get_space_pages(
+        self, 
+        base_url: str, 
+        space_key: str, 
+        username: str, 
+        api_token: str,
+        max_depth: int = None,
+        include_children: bool = True
+    ) -> List[Dict[str, Any]]:
+        """Get pages from a Confluence space with optional depth limiting."""
         pages = []
         start = 0
         limit = 50
@@ -315,19 +365,52 @@ class ConfluenceIngestionService:
                 'type': 'page',
                 'status': 'current',
                 'start': start,
-                'limit': limit
+                'limit': limit,
+                'expand': 'version,history,ancestors'
             }
             
             response = requests.get(url, params=params, auth=(username, api_token))
             response.raise_for_status()
             
             data = response.json()
-            pages.extend(data['results'])
+            
+            for page in data['results']:
+                # Filter by depth if max_depth is specified
+                if max_depth is not None:
+                    ancestors = page.get('ancestors', [])
+                    if len(ancestors) > max_depth:
+                        continue
+                
+                pages.append(page)
             
             if len(data['results']) < limit:
                 break
             
             start += limit
+        
+        return pages
+    
+    async def _get_specific_pages(
+        self, 
+        base_url: str, 
+        page_ids: List[str], 
+        username: str, 
+        api_token: str
+    ) -> List[Dict[str, Any]]:
+        """Get specific pages by their IDs."""
+        pages = []
+        
+        for page_id in page_ids:
+            try:
+                url = f"{base_url}/rest/api/content/{page_id}"
+                params = {'expand': 'version,history,ancestors'}
+                
+                response = requests.get(url, params=params, auth=(username, api_token))
+                response.raise_for_status()
+                
+                pages.append(response.json())
+            except Exception as e:
+                logger.warning(f"Failed to fetch page {page_id}: {e}")
         
         return pages
     
@@ -353,6 +436,273 @@ class ConfluenceIngestionService:
         except Exception as e:
             logger.warning(f"Failed to get content for page {page_id}: {e}")
             return None
+
+class JiraIngestionService:
+    """Service for ingesting JIRA issues."""
+    
+    def __init__(self):
+        self.chunker = TextChunker()
+    
+    async def ingest_project(
+        self, 
+        project_key: str, 
+        workspace_id: int,
+        base_url: str = None,
+        username: str = None,
+        api_token: str = None,
+        issue_types: List[str] = None,
+        specific_tickets: List[str] = None,
+        max_results: int = None
+    ) -> Dict[str, Any]:
+        """
+        Ingest issues from a JIRA project.
+        
+        Args:
+            project_key: JIRA project key (e.g., 'PROJ')
+            workspace_id: Target workspace ID
+            base_url: JIRA base URL (e.g., 'https://company.atlassian.net')
+            username: JIRA username/email
+            api_token: JIRA API token
+            issue_types: Filter by issue types ['Story', 'Epic', 'Bug', 'Task'] or None for all
+            specific_tickets: List of specific ticket keys to ingest (e.g., ['PROJ-123', 'PROJ-456'])
+            max_results: Maximum number of issues to fetch (None for all)
+        """
+        try:
+            base_url = base_url or settings.JIRA_BASE_URL if hasattr(settings, 'JIRA_BASE_URL') else None
+            username = username or settings.JIRA_USERNAME if hasattr(settings, 'JIRA_USERNAME') else None
+            api_token = api_token or settings.JIRA_API_TOKEN if hasattr(settings, 'JIRA_API_TOKEN') else None
+            
+            if not all([base_url, username, api_token]):
+                return {"success": False, "error": "Missing JIRA credentials"}
+            
+            # Ensure base_url doesn't have trailing slash
+            base_url = base_url.rstrip('/')
+            
+            logger.info(f"Starting JIRA ingestion for project {project_key} (types={issue_types}, specific={specific_tickets})")
+            
+            # Get issues from project
+            issues = await self._get_project_issues(
+                base_url, project_key, username, api_token,
+                issue_types=issue_types,
+                specific_tickets=specific_tickets,
+                max_results=max_results
+            )
+            
+            documents = []
+            for issue in issues:
+                try:
+                    content = self._format_issue_content(issue)
+                    if content:
+                        issue_key = issue['key']
+                        issue_type = issue['fields'].get('issuetype', {}).get('name', 'Unknown')
+                        summary = issue['fields'].get('summary', 'No summary')
+                        status = issue['fields'].get('status', {}).get('name', 'Unknown')
+                        priority = issue['fields'].get('priority', {}).get('name', 'None')
+                        assignee = issue['fields'].get('assignee', {})
+                        assignee_name = assignee.get('displayName', 'Unassigned') if assignee else 'Unassigned'
+                        reporter = issue['fields'].get('reporter', {})
+                        reporter_name = reporter.get('displayName', 'Unknown') if reporter else 'Unknown'
+                        created = issue['fields'].get('created', '')
+                        updated = issue['fields'].get('updated', '')
+                        labels = issue['fields'].get('labels', [])
+                        components = [c.get('name', '') for c in issue['fields'].get('components', [])]
+                        
+                        documents.append({
+                            'title': f"[{issue_key}] {summary}",
+                            'content': content,
+                            'file_path': f"jira/{project_key}/{issue_key}",
+                            'file_type': 'jira',
+                            'source_type': 'jira',
+                            'workspace_id': workspace_id,
+                            'metadata': {
+                                'project_key': project_key,
+                                'issue_key': issue_key,
+                                'issue_type': issue_type,
+                                'status': status,
+                                'priority': priority,
+                                'assignee': assignee_name,
+                                'reporter': reporter_name,
+                                'created': created,
+                                'updated': updated,
+                                'labels': labels,
+                                'components': components,
+                                'issue_url': f"{base_url}/browse/{issue_key}"
+                            }
+                        })
+                except Exception as e:
+                    logger.warning(f"Failed to process issue {issue.get('key', 'unknown')}: {e}")
+            
+            logger.info(f"Processed {len(documents)} issues from JIRA project {project_key}")
+            return {"success": True, "documents": documents}
+            
+        except Exception as e:
+            logger.error(f"Error ingesting JIRA project: {e}")
+            return {"success": False, "error": str(e)}
+    
+    async def _get_project_issues(
+        self, 
+        base_url: str, 
+        project_key: str,
+        username: str, 
+        api_token: str,
+        issue_types: List[str] = None,
+        specific_tickets: List[str] = None,
+        max_results: int = None
+    ) -> List[Dict[str, Any]]:
+        """Get issues from a JIRA project with optional filtering."""
+        issues = []
+        start_at = 0
+        page_size = 50
+        
+        # Build JQL query
+        if specific_tickets:
+            # Fetch specific tickets
+            jql = f"key in ({','.join(specific_tickets)})"
+        else:
+            jql_parts = [f"project = {project_key}"]
+            if issue_types:
+                type_filter = ','.join([f'"{t}"' for t in issue_types])
+                jql_parts.append(f"issuetype in ({type_filter})")
+            jql = ' AND '.join(jql_parts)
+            jql += " ORDER BY updated DESC"
+        
+        logger.info(f"JIRA JQL: {jql}")
+        
+        while True:
+            url = f"{base_url}/rest/api/3/search"
+            params = {
+                'jql': jql,
+                'startAt': start_at,
+                'maxResults': page_size,
+                'fields': 'summary,description,issuetype,status,priority,assignee,reporter,created,updated,labels,components,comment'
+            }
+            
+            response = requests.get(url, params=params, auth=(username, api_token))
+            response.raise_for_status()
+            
+            data = response.json()
+            issues.extend(data['issues'])
+            
+            # Check if we've reached the limit or end
+            if max_results and len(issues) >= max_results:
+                issues = issues[:max_results]
+                break
+            
+            if start_at + page_size >= data['total']:
+                break
+            
+            start_at += page_size
+        
+        return issues
+    
+    def _format_issue_content(self, issue: Dict[str, Any]) -> str:
+        """Format JIRA issue into readable text content."""
+        fields = issue['fields']
+        
+        parts = []
+        
+        # Header
+        parts.append(f"# {issue['key']}: {fields.get('summary', 'No summary')}")
+        parts.append("")
+        
+        # Metadata
+        parts.append("## Issue Details")
+        parts.append(f"- **Type:** {fields.get('issuetype', {}).get('name', 'Unknown')}")
+        parts.append(f"- **Status:** {fields.get('status', {}).get('name', 'Unknown')}")
+        parts.append(f"- **Priority:** {fields.get('priority', {}).get('name', 'None')}")
+        
+        assignee = fields.get('assignee')
+        parts.append(f"- **Assignee:** {assignee.get('displayName', 'Unassigned') if assignee else 'Unassigned'}")
+        
+        reporter = fields.get('reporter')
+        parts.append(f"- **Reporter:** {reporter.get('displayName', 'Unknown') if reporter else 'Unknown'}")
+        
+        if fields.get('labels'):
+            parts.append(f"- **Labels:** {', '.join(fields['labels'])}")
+        
+        components = fields.get('components', [])
+        if components:
+            parts.append(f"- **Components:** {', '.join([c.get('name', '') for c in components])}")
+        
+        parts.append("")
+        
+        # Description
+        description = fields.get('description')
+        if description:
+            parts.append("## Description")
+            # Handle Atlassian Document Format (ADF)
+            if isinstance(description, dict):
+                parts.append(self._parse_adf_content(description))
+            else:
+                parts.append(str(description))
+            parts.append("")
+        
+        # Comments
+        comments = fields.get('comment', {}).get('comments', [])
+        if comments:
+            parts.append("## Comments")
+            for comment in comments:
+                author = comment.get('author', {}).get('displayName', 'Unknown')
+                created = comment.get('created', '')[:10]  # Just date
+                body = comment.get('body', '')
+                
+                # Handle ADF format for comments
+                if isinstance(body, dict):
+                    body = self._parse_adf_content(body)
+                
+                parts.append(f"### {author} ({created})")
+                parts.append(body)
+                parts.append("")
+        
+        return '\n'.join(parts)
+    
+    def _parse_adf_content(self, adf: Dict[str, Any]) -> str:
+        """Parse Atlassian Document Format to plain text."""
+        if not adf or not isinstance(adf, dict):
+            return ""
+        
+        content_parts = []
+        
+        def extract_text(node):
+            if isinstance(node, str):
+                return node
+            if isinstance(node, dict):
+                if node.get('type') == 'text':
+                    return node.get('text', '')
+                if 'content' in node:
+                    return ''.join(extract_text(child) for child in node['content'])
+            if isinstance(node, list):
+                return ''.join(extract_text(item) for item in node)
+            return ''
+        
+        for block in adf.get('content', []):
+            block_type = block.get('type', '')
+            text = extract_text(block)
+            
+            if block_type == 'heading':
+                level = block.get('attrs', {}).get('level', 1)
+                content_parts.append(f"{'#' * level} {text}")
+            elif block_type == 'bulletList':
+                for item in block.get('content', []):
+                    item_text = extract_text(item)
+                    content_parts.append(f"- {item_text}")
+            elif block_type == 'orderedList':
+                for i, item in enumerate(block.get('content', []), 1):
+                    item_text = extract_text(item)
+                    content_parts.append(f"{i}. {item_text}")
+            elif block_type == 'codeBlock':
+                lang = block.get('attrs', {}).get('language', '')
+                content_parts.append(f"```{lang}")
+                content_parts.append(text)
+                content_parts.append("```")
+            else:
+                if text.strip():
+                    content_parts.append(text)
+            
+            content_parts.append("")
+        
+        return '\n'.join(content_parts)
+
 
 class PDFExtractionStrategy:
     """Enum-like class for PDF extraction strategies."""
@@ -631,6 +981,7 @@ class IngestionOrchestrator:
     def __init__(self):
         self.git_service = GitIngestionService()
         self.confluence_service = ConfluenceIngestionService()
+        self.jira_service = JiraIngestionService()
         self.document_service = DocumentIngestionService()
         self.vector_service = VectorService()
         self.chunker = TextChunker()
@@ -673,7 +1024,23 @@ class IngestionOrchestrator:
                     data_source.workspace_id,
                     config.get('base_url'),
                     config.get('username'),
-                    config.get('api_token')
+                    config.get('api_token'),
+                    page_ids=config.get('page_ids'),
+                    max_depth=config.get('max_depth'),
+                    include_children=config.get('include_children', True)
+                )
+            elif data_source.source_type == "jira":
+                config = data_source.config or {}
+                logger.info(f"[JIRA] Fetching issues from project: {config.get('project_key')}")
+                result = await self.jira_service.ingest_project(
+                    config.get('project_key'),
+                    data_source.workspace_id,
+                    config.get('base_url'),
+                    config.get('username'),
+                    config.get('api_token'),
+                    issue_types=config.get('issue_types'),
+                    specific_tickets=config.get('specific_tickets'),
+                    max_results=config.get('max_results')
                 )
             elif data_source.source_type == "document":
                 result = await self.document_service.ingest_document(

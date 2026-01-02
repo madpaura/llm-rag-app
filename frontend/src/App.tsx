@@ -1,11 +1,14 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider } from './contexts/AuthContext';
+import { ConfigProvider } from './contexts/ConfigContext';
 import { Layout } from './components/Layout';
 import { Login } from './pages/Login';
 import { Dashboard } from './pages/Dashboard';
 import { WorkspaceView } from './pages/WorkspaceView';
 import { IngestionPage } from './pages/IngestionPage';
+import { SettingsPage } from './pages/SettingsPage';
+import { EmbeddingsPage } from './pages/EmbeddingsPage';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import './App.css';
 
@@ -25,26 +28,30 @@ const basename = getBasename();
 function App() {
   return (
     <AuthProvider>
-      <Router basename={basename}>
-        <div className="App">
-          <Routes>
-            <Route path="/login" element={<Login />} />
-            <Route
-              path="/"
-              element={
-                <ProtectedRoute>
-                  <Layout />
-                </ProtectedRoute>
-              }
-            >
-              <Route index element={<Navigate to="/dashboard" replace />} />
-              <Route path="dashboard" element={<Dashboard />} />
-              <Route path="workspace/:workspaceId" element={<WorkspaceView />} />
-              <Route path="workspace/:workspaceId/ingest" element={<IngestionPage />} />
-            </Route>
-          </Routes>
-        </div>
-      </Router>
+      <ConfigProvider>
+        <Router basename={basename}>
+          <div className="App">
+            <Routes>
+              <Route path="/login" element={<Login />} />
+              <Route
+                path="/"
+                element={
+                  <ProtectedRoute>
+                    <Layout />
+                  </ProtectedRoute>
+                }
+              >
+                <Route index element={<Navigate to="/dashboard" replace />} />
+                <Route path="dashboard" element={<Dashboard />} />
+                <Route path="settings" element={<SettingsPage />} />
+                <Route path="workspace/:workspaceId" element={<WorkspaceView />} />
+                <Route path="workspace/:workspaceId/ingest" element={<IngestionPage />} />
+                <Route path="workspace/:workspaceId/embeddings" element={<EmbeddingsPage />} />
+              </Route>
+            </Routes>
+          </div>
+        </Router>
+      </ConfigProvider>
     </AuthProvider>
   );
 }

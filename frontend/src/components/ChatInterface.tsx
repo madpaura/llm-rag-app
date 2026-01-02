@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Loader2, ExternalLink, FileText, Settings2, Eye } from 'lucide-react';
+import { Send, Loader2, ExternalLink, FileText, Settings2, Eye, Ticket, Globe } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -183,70 +183,143 @@ export function ChatInterface({ session, workspaceId }: ChatInterfaceProps) {
           {message.metadata?.sources && message.metadata.sources.length > 0 && (
             <div className="mt-4 pt-3 border-t border-gray-100">
               <p className="text-xs font-medium text-gray-600 mb-2">Sources:</p>
-              <div className="space-y-1">
-                {message.metadata.sources.map((source: CitationSource, index: number) => (
-                  <div key={index} className="flex items-center space-x-2 text-xs group">
-                    <FileText className="h-3 w-3 text-gray-400" />
-                    <span className="text-gray-600 font-medium">{source.title}</span>
-                    
-                    {/* Line numbers */}
-                    {source.start_line && source.end_line && (
-                      <span className="text-gray-400">
-                        (L{source.start_line}-{source.end_line})
-                      </span>
-                    )}
-                    
-                    {/* Page number for PDFs */}
-                    {source.page_number && (
-                      <span className="text-gray-400">
-                        (Page {source.page_number})
-                      </span>
-                    )}
-                    
-                    {/* View document button */}
-                    {source.document_id && (
-                      <button
-                        onClick={() => setViewingDocument({
-                          documentId: source.document_id!,
-                          chunkId: source.chunk_id,
-                          startLine: source.start_line,
-                          endLine: source.end_line
-                        })}
-                        className="flex items-center space-x-1 text-primary-600 hover:text-primary-700 opacity-0 group-hover:opacity-100 transition-opacity"
-                        title="View source document"
-                      >
-                        <Eye className="h-3 w-3" />
-                        <span>View</span>
-                      </button>
-                    )}
-                    
-                    {/* External links */}
-                    {source.repo_url && (
-                      <a
-                        href={source.repo_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-primary-600 hover:text-primary-500"
-                        title="Open repository"
-                      >
-                        <ExternalLink className="h-3 w-3" />
-                      </a>
-                    )}
-                    {source.page_url && (
-                      <a
-                        href={source.page_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-primary-600 hover:text-primary-500"
-                        title="Open page"
-                      >
-                        <ExternalLink className="h-3 w-3" />
-                      </a>
-                    )}
-                    
-                    <span className="text-gray-400">({source.score?.toFixed(2)})</span>
-                  </div>
-                ))}
+              <div className="space-y-2">
+                {message.metadata.sources.map((source: CitationSource, index: number) => {
+                  // Determine source type from metadata
+                  const isJira = source.issue_key || source.file_path?.startsWith('jira/');
+                  const isConfluence = source.space_key || source.file_path?.startsWith('confluence/');
+                  
+                  return (
+                    <div key={index} className="flex items-start space-x-2 text-xs group p-2 rounded hover:bg-gray-50">
+                      {/* Source type icon */}
+                      {isJira ? (
+                        <Ticket className="h-3.5 w-3.5 text-blue-500 mt-0.5 flex-shrink-0" />
+                      ) : isConfluence ? (
+                        <Globe className="h-3.5 w-3.5 text-blue-600 mt-0.5 flex-shrink-0" />
+                      ) : (
+                        <FileText className="h-3.5 w-3.5 text-gray-400 mt-0.5 flex-shrink-0" />
+                      )}
+                      
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center flex-wrap gap-1">
+                          <span className="text-gray-700 font-medium truncate">{source.title}</span>
+                          
+                          {/* JIRA metadata */}
+                          {isJira && (
+                            <>
+                              {source.issue_type && (
+                                <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-[10px] font-medium">
+                                  {source.issue_type}
+                                </span>
+                              )}
+                              {source.issue_status && (
+                                <span className="px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px]">
+                                  {source.issue_status}
+                                </span>
+                              )}
+                            </>
+                          )}
+                          
+                          {/* Confluence metadata */}
+                          {isConfluence && source.space_key && (
+                            <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded text-[10px]">
+                              {source.space_key}
+                            </span>
+                          )}
+                          
+                          {/* Line numbers */}
+                          {source.start_line && source.end_line && (
+                            <span className="text-gray-400">
+                              (L{source.start_line}-{source.end_line})
+                            </span>
+                          )}
+                          
+                          {/* Page number for PDFs */}
+                          {source.page_number && (
+                            <span className="text-gray-400">
+                              (Page {source.page_number})
+                            </span>
+                          )}
+                        </div>
+                        
+                        <div className="flex items-center gap-2 mt-1">
+                          {/* View document button */}
+                          {source.document_id && (
+                            <button
+                              onClick={() => setViewingDocument({
+                                documentId: source.document_id!,
+                                chunkId: source.chunk_id,
+                                startLine: source.start_line,
+                                endLine: source.end_line
+                              })}
+                              className="flex items-center space-x-1 text-primary-600 hover:text-primary-700"
+                              title="View source document"
+                            >
+                              <Eye className="h-3 w-3" />
+                              <span>View</span>
+                            </button>
+                          )}
+                          
+                          {/* JIRA link */}
+                          {isJira && source.issue_url && (
+                            <a
+                              href={source.issue_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex items-center space-x-1 text-blue-600 hover:text-blue-700"
+                              title="Open in JIRA"
+                            >
+                              <ExternalLink className="h-3 w-3" />
+                              <span>JIRA</span>
+                            </a>
+                          )}
+                          
+                          {/* Confluence link */}
+                          {isConfluence && (source.confluence_url || source.page_url) && (
+                            <a
+                              href={source.confluence_url || source.page_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex items-center space-x-1 text-blue-600 hover:text-blue-700"
+                              title="Open in Confluence"
+                            >
+                              <ExternalLink className="h-3 w-3" />
+                              <span>Confluence</span>
+                            </a>
+                          )}
+                          
+                          {/* External links for other sources */}
+                          {!isJira && !isConfluence && source.repo_url && (
+                            <a
+                              href={source.repo_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex items-center space-x-1 text-primary-600 hover:text-primary-500"
+                              title="Open repository"
+                            >
+                              <ExternalLink className="h-3 w-3" />
+                              <span>Repo</span>
+                            </a>
+                          )}
+                          {!isJira && !isConfluence && source.page_url && (
+                            <a
+                              href={source.page_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex items-center space-x-1 text-primary-600 hover:text-primary-500"
+                              title="Open page"
+                            >
+                              <ExternalLink className="h-3 w-3" />
+                              <span>Link</span>
+                            </a>
+                          )}
+                          
+                          <span className="text-gray-400 ml-auto">Score: {source.score?.toFixed(2)}</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}

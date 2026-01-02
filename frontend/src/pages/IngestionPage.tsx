@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { ArrowLeft, GitBranch, Globe, Upload, Loader2, CheckCircle, XCircle, Clock, Code, FileCode } from 'lucide-react';
+import { ArrowLeft, GitBranch, Globe, Upload, Loader2, CheckCircle, XCircle, Clock, Code, FileCode, Ticket } from 'lucide-react';
 import { api, DataSource, Workspace, CodeIngestionStats } from '../services/api';
 
 // Progress tracking interface
@@ -21,7 +21,7 @@ export function IngestionPage() {
   const { workspaceId } = useParams<{ workspaceId: string }>();
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [dataSources, setDataSources] = useState<DataSource[]>([]);
-  const [activeTab, setActiveTab] = useState<'git' | 'confluence' | 'document' | 'code'>('git');
+  const [activeTab, setActiveTab] = useState<'git' | 'confluence' | 'jira' | 'document' | 'code'>('git');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -60,8 +60,33 @@ export function IngestionPage() {
     space_key: '',
     base_url: '',
     username: '',
-    api_token: ''
+    api_token: '',
+    page_ids: '',
+    max_depth: '' as string | number,
+    include_children: true
   });
+
+  // JIRA form state
+  const [jiraForm, setJiraForm] = useState({
+    name: '',
+    project_key: '',
+    base_url: '',
+    username: '',
+    api_token: '',
+    issue_types: [] as string[],
+    specific_tickets: '',
+    max_results: '' as string | number
+  });
+
+  // JIRA issue type options
+  const JIRA_ISSUE_TYPES = [
+    { value: 'Story', label: 'Story' },
+    { value: 'Epic', label: 'Epic' },
+    { value: 'Bug', label: 'Bug' },
+    { value: 'Task', label: 'Task' },
+    { value: 'Sub-task', label: 'Sub-task' },
+    { value: 'Improvement', label: 'Improvement' },
+  ];
 
   // Document form state
   const [documentForm, setDocumentForm] = useState({
@@ -212,16 +237,29 @@ export function IngestionPage() {
     setLoading(true);
     setError('');
     setSuccess('');
+    setIngestionProgress(null);
 
     try {
+      // Parse page_ids if provided
+      const pageIds = confluenceForm.page_ids
+        ? confluenceForm.page_ids.split(',').map(id => id.trim()).filter(id => id)
+        : undefined;
+
       const result = await api.ingestConfluenceSpace({
         workspace_id: parseInt(workspaceId),
-        ...confluenceForm
+        name: confluenceForm.name,
+        space_key: confluenceForm.space_key,
+        base_url: confluenceForm.base_url || undefined,
+        username: confluenceForm.username || undefined,
+        api_token: confluenceForm.api_token || undefined,
+        page_ids: pageIds,
+        max_depth: confluenceForm.max_depth ? parseInt(confluenceForm.max_depth.toString()) : undefined,
+        include_children: confluenceForm.include_children
       });
 
       if (result.success) {
         setSuccess(`Successfully ingested ${result.documents_count} documents from Confluence space`);
-        setConfluenceForm({ name: '', space_key: '', base_url: '', username: '', api_token: '' });
+        setConfluenceForm({ name: '', space_key: '', base_url: '', username: '', api_token: '', page_ids: '', max_depth: '', include_children: true });
         loadWorkspaceData();
       } else {
         setError(result.error || 'Failed to ingest Confluence space');
@@ -230,6 +268,71 @@ export function IngestionPage() {
       setError('Failed to ingest Confluence space');
       console.error('Confluence ingestion error:', err);
     } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleJiraSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!workspaceId) return;
+
+    setLoading(true);
+    setError('');
+    setSuccess('');
+    setIngestionProgress(null);
+
+    try {
+      // Parse specific_tickets if provided
+      const specificTickets = jiraForm.specific_tickets
+        ? jiraForm.specific_tickets.split(',').map(t => t.trim()).filter(t => t)
+        : undefined;
+
+      const result = await api.ingestJiraProject({
+        workspace_id: parseInt(workspaceId),
+        name: jiraForm.name,
+        project_key: jiraForm.project_key,
+        base_url: jiraForm.base_url || undefined,
+        username: jiraForm.username || undefined,
+        api_token: jiraForm.api_token || undefined,
+        issue_types: jiraForm.issue_types.length > 0 ? jiraForm.issue_types : undefined,
+        specific_tickets: specificTickets,
+        max_results: jiraForm.max_results ? parseInt(jiraForm.max_results.toString()) : undefined
+      });
+
+      if (result.data_source_id) {
+        // Start polling for progress
+        startProgressPolling(result.data_source_id);
+        
+        // Poll until completion
+        const checkCompletion = setInterval(async () => {
+          try {
+            const progress = await api.getIngestionProgress(result.data_source_id);
+            
+            if (!progress.in_progress || progress.status === 'completed' || progress.status === 'failed') {
+              clearInterval(checkCompletion);
+              stopProgressPolling();
+              setLoading(false);
+              
+              if (progress.status === 'completed') {
+                setSuccess('Successfully ingested JIRA issues');
+                setJiraForm({ name: '', project_key: '', base_url: '', username: '', api_token: '', issue_types: [], specific_tickets: '', max_results: '' });
+                loadWorkspaceData();
+              } else if (progress.status === 'failed') {
+                setError('JIRA ingestion failed. Check server logs for details.');
+              }
+            }
+          } catch (err) {
+            console.error('Error checking completion:', err);
+          }
+        }, 2000);
+      } else if (!result.success) {
+        setError(result.error || 'Failed to start JIRA ingestion');
+        setLoading(false);
+      }
+    } catch (err) {
+      setError('Failed to ingest JIRA project');
+      console.error('JIRA ingestion error:', err);
+      stopProgressPolling();
       setLoading(false);
     }
   };
@@ -398,6 +501,17 @@ export function IngestionPage() {
               >
                 <Globe className="h-4 w-4 inline mr-2" />
                 Confluence
+              </button>
+              <button
+                onClick={() => setActiveTab('jira')}
+                className={`py-2 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'jira'
+                    ? 'border-primary-500 text-primary-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                <Ticket className="h-4 w-4 inline mr-2" />
+                JIRA
               </button>
               <button
                 onClick={() => setActiveTab('document')}
@@ -700,6 +814,54 @@ export function IngestionPage() {
                   </div>
                 </div>
 
+                {/* Page Selection Options */}
+                <div className="p-4 bg-gray-50 rounded-md">
+                  <h4 className="text-sm font-medium text-gray-700 mb-3">Page Selection (Optional)</h4>
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Specific Page IDs
+                      </label>
+                      <input
+                        type="text"
+                        value={confluenceForm.page_ids}
+                        onChange={(e) => setConfluenceForm({ ...confluenceForm, page_ids: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                        placeholder="123456, 789012 (comma-separated)"
+                      />
+                      <p className="text-xs text-gray-500 mt-1">Leave empty to fetch all pages from the space</p>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          Max Depth
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          value={confluenceForm.max_depth}
+                          onChange={(e) => setConfluenceForm({ ...confluenceForm, max_depth: e.target.value })}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                          placeholder="Unlimited"
+                        />
+                        <p className="text-xs text-gray-500 mt-1">0 = root pages only</p>
+                      </div>
+                      <div className="flex items-center pt-6">
+                        <input
+                          type="checkbox"
+                          id="includeChildren"
+                          checked={confluenceForm.include_children}
+                          onChange={(e) => setConfluenceForm({ ...confluenceForm, include_children: e.target.checked })}
+                          className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
+                        />
+                        <label htmlFor="includeChildren" className="ml-2 text-sm text-gray-700">
+                          Include child pages
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
                 <button
                   type="submit"
                   disabled={loading}
@@ -711,6 +873,174 @@ export function IngestionPage() {
                     <Globe className="h-4 w-4 mr-2" />
                   )}
                   Ingest Space
+                </button>
+              </form>
+            </div>
+          )}
+
+          {/* JIRA Form */}
+          {activeTab === 'jira' && (
+            <div className="bg-white rounded-lg shadow p-6">
+              <h3 className="text-lg font-medium text-gray-900 mb-4">Ingest JIRA Project</h3>
+              <form onSubmit={handleJiraSubmit} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Name
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={jiraForm.name}
+                    onChange={(e) => setJiraForm({ ...jiraForm, name: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                    placeholder="Project Issues"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Project Key
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={jiraForm.project_key}
+                    onChange={(e) => setJiraForm({ ...jiraForm, project_key: e.target.value.toUpperCase() })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                    placeholder="PROJ"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Base URL
+                  </label>
+                  <input
+                    type="url"
+                    value={jiraForm.base_url}
+                    onChange={(e) => setJiraForm({ ...jiraForm, base_url: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                    placeholder="https://company.atlassian.net"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Username / Email
+                    </label>
+                    <input
+                      type="text"
+                      value={jiraForm.username}
+                      onChange={(e) => setJiraForm({ ...jiraForm, username: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      API Token
+                    </label>
+                    <input
+                      type="password"
+                      value={jiraForm.api_token}
+                      onChange={(e) => setJiraForm({ ...jiraForm, api_token: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                    />
+                  </div>
+                </div>
+
+                {/* Issue Type Selection */}
+                <div className="p-4 bg-gray-50 rounded-md">
+                  <h4 className="text-sm font-medium text-gray-700 mb-3">Issue Type Filter (Optional)</h4>
+                  <div className="flex flex-wrap gap-2">
+                    {JIRA_ISSUE_TYPES.map((type) => (
+                      <label key={type.value} className="inline-flex items-center">
+                        <input
+                          type="checkbox"
+                          checked={jiraForm.issue_types.includes(type.value)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setJiraForm({ ...jiraForm, issue_types: [...jiraForm.issue_types, type.value] });
+                            } else {
+                              setJiraForm({ ...jiraForm, issue_types: jiraForm.issue_types.filter(t => t !== type.value) });
+                            }
+                          }}
+                          className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
+                        />
+                        <span className="ml-2 text-sm text-gray-700">{type.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">Leave all unchecked to fetch all issue types</p>
+                </div>
+
+                {/* Specific Tickets */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Specific Tickets (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={jiraForm.specific_tickets}
+                    onChange={(e) => setJiraForm({ ...jiraForm, specific_tickets: e.target.value.toUpperCase() })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                    placeholder="PROJ-123, PROJ-456 (comma-separated)"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Overrides project-wide fetch if specified</p>
+                </div>
+
+                {/* Max Results */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Max Results (Optional)
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={jiraForm.max_results}
+                    onChange={(e) => setJiraForm({ ...jiraForm, max_results: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                    placeholder="Unlimited"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Limit the number of issues to fetch</p>
+                </div>
+
+                {/* Progress Bar */}
+                {loading && ingestionProgress && (
+                  <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-sm font-medium text-blue-800">
+                        {ingestionProgress.stage || 'Starting...'}
+                      </span>
+                      <span className="text-sm text-blue-600">
+                        Stage {ingestionProgress.stage_num || 1}/{ingestionProgress.total_stages || 4}
+                      </span>
+                    </div>
+                    <div className="w-full bg-blue-200 rounded-full h-2">
+                      <div
+                        className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                        style={{ 
+                          width: `${((ingestionProgress.stage_num || 1) / (ingestionProgress.total_stages || 4)) * 100}%` 
+                        }}
+                      />
+                    </div>
+                    {ingestionProgress.message && (
+                      <p className="text-xs text-blue-700 mt-2">{ingestionProgress.message}</p>
+                    )}
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 disabled:opacity-50"
+                >
+                  {loading ? (
+                    <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                  ) : (
+                    <Ticket className="h-4 w-4 mr-2" />
+                  )}
+                  {loading ? 'Ingesting...' : 'Ingest JIRA Issues'}
                 </button>
               </form>
             </div>

@@ -545,6 +545,20 @@ Alternative questions:"""
             if 'page_url' in metadata:
                 source['page_url'] = metadata['page_url']
             
+            # JIRA metadata
+            if metadata.get('issue_key') or metadata.get('project_key'):
+                source['issue_key'] = metadata.get('issue_key')
+                source['issue_type'] = metadata.get('issue_type')
+                source['issue_status'] = metadata.get('status')
+                source['issue_url'] = metadata.get('issue_url')
+                source['project_key'] = metadata.get('project_key')
+            
+            # Confluence metadata
+            if metadata.get('space_key') or metadata.get('page_id'):
+                source['space_key'] = metadata.get('space_key')
+                source['page_id'] = metadata.get('page_id')
+                source['confluence_url'] = metadata.get('page_url')
+            
             sources.append(source)
         
         return sources

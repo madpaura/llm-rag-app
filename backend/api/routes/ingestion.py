@@ -67,6 +67,21 @@ class ConfluenceIngestionRequest(BaseModel):
     base_url: Optional[str] = None
     username: Optional[str] = None
     api_token: Optional[str] = None
+    page_ids: Optional[List[str]] = None  # Specific page IDs to ingest
+    max_depth: Optional[int] = None  # Max depth for child pages (None = all)
+    include_children: bool = True  # Include child pages
+
+
+class JiraIngestionRequest(BaseModel):
+    workspace_id: int
+    name: str
+    project_key: str
+    base_url: Optional[str] = None
+    username: Optional[str] = None
+    api_token: Optional[str] = None
+    issue_types: Optional[List[str]] = None  # Filter: ['Story', 'Epic', 'Bug', 'Task']
+    specific_tickets: Optional[List[str]] = None  # Specific ticket keys like ['PROJ-123']
+    max_results: Optional[int] = None  # Max number of issues to fetch
 
 
 class CodeIngestionRequest(BaseModel):
@@ -280,6 +295,85 @@ async def ingest_confluence_space(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
         )
+
+
+@router.post("/jira")
+async def ingest_jira_project(
+    request: JiraIngestionRequest,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Ingest issues from a JIRA project."""
+    try:
+        # Verify workspace exists and user has access
+        workspace = db.query(Workspace).filter(Workspace.id == request.workspace_id).first()
+        if not workspace:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Workspace not found"
+            )
+        
+        # Create data source record
+        config = {
+            "project_key": request.project_key,
+            "base_url": request.base_url,
+            "username": request.username,
+            "api_token": request.api_token,
+            "issue_types": request.issue_types,
+            "specific_tickets": request.specific_tickets,
+            "max_results": request.max_results
+        }
+        
+        data_source = DataSource(
+            workspace_id=request.workspace_id,
+            name=request.name,
+            source_type="jira",
+            source_url=f"{request.base_url}/projects/{request.project_key}" if request.base_url else None,
+            config=config,
+            status="pending"
+        )
+        db.add(data_source)
+        db.commit()
+        
+        # Initialize progress tracking
+        update_progress(data_source.id, "Initializing", 1, 4, 0, 1, "Starting JIRA ingestion...")
+        
+        # Start ingestion process in background
+        async def run_jira_ingestion():
+            try:
+                orchestrator = IngestionOrchestrator()
+                result = await orchestrator.ingest_data_source(data_source.id, progress_callback=update_progress)
+                
+                if not result["success"]:
+                    logger.error(f"JIRA ingestion failed for data source {data_source.id}: {result.get('error')}")
+                
+                # Clear progress on completion
+                await asyncio.sleep(2)
+                clear_progress(data_source.id)
+            except Exception as e:
+                logger.error(f"Background JIRA ingestion error: {e}")
+                clear_progress(data_source.id)
+        
+        # Start the background task
+        asyncio.create_task(run_jira_ingestion())
+        
+        return {
+            "success": True,
+            "data_source_id": data_source.id,
+            "message": "JIRA project ingestion started",
+            "documents_count": 0,
+            "in_progress": True
+        }
+        
+    except Exception as e:
+        logger.error(f"Error starting JIRA project ingestion: {e}")
+        if 'data_source' in locals():
+            clear_progress(data_source.id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
 
 @router.post("/document")
 async def ingest_document(

@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse
 import structlog
 from contextlib import asynccontextmanager
 
-from api.routes import auth, workspaces, ingestion, query, health, rag, admin
+from api.routes import auth, workspaces, ingestion, query, health, rag, admin, embeddings
 from core.config import get_settings
 from core.database import init_db
 from core.logging import setup_logging
@@ -377,6 +377,7 @@ app.include_router(health.router, prefix="/health", tags=["health"])
 app.include_router(auth.router, prefix="/api/auth", tags=["authentication"])
 app.include_router(workspaces.router, prefix="/api/workspaces", tags=["workspaces"])
 app.include_router(ingestion.router, prefix="/api/ingestion", tags=["ingestion"])
+app.include_router(embeddings.router, prefix="/api/embeddings", tags=["embeddings"])
 app.include_router(query.router, prefix="/api/query", tags=["query"])
 app.include_router(rag.router, prefix="/api/rag", tags=["rag-engine"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])

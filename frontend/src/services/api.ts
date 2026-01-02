@@ -124,6 +124,16 @@ export interface CitationSource {
   file_path?: string;
   repo_url?: string;
   page_url?: string;
+  // JIRA metadata
+  issue_key?: string;
+  issue_type?: string;
+  issue_status?: string;
+  issue_url?: string;
+  project_key?: string;
+  // Confluence metadata
+  space_key?: string;
+  page_id?: string;
+  confluence_url?: string;
 }
 
 export interface QueryResponse {
@@ -299,8 +309,37 @@ export const api = {
     base_url?: string;
     username?: string;
     api_token?: string;
+    page_ids?: string[];
+    max_depth?: number;
+    include_children?: boolean;
   }): Promise<IngestionResponse> {
     const response = await apiClient.post('/api/ingestion/confluence', data);
+    return response.data;
+  },
+
+  async ingestJiraProject(data: {
+    workspace_id: number;
+    name: string;
+    project_key: string;
+    base_url?: string;
+    username?: string;
+    api_token?: string;
+    issue_types?: string[];
+    specific_tickets?: string[];
+    max_results?: number;
+  }): Promise<IngestionResponse> {
+    const response = await apiClient.post('/api/ingestion/jira', data);
+    return response.data;
+  },
+
+  // Embeddings API
+  async getWorkspaceEmbeddings(workspaceId: number): Promise<any[]> {
+    const response = await apiClient.get(`/api/embeddings/workspace/${workspaceId}`);
+    return response.data;
+  },
+
+  async getDocumentChunks(documentId: number): Promise<any[]> {
+    const response = await apiClient.get(`/api/embeddings/document/${documentId}/chunks`);
     return response.data;
   },
 
