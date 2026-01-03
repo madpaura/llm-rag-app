@@ -871,14 +871,16 @@ export function IngestionPage() {
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">
-                      API Token
+                      Token / Password
                     </label>
                     <input
                       type="password"
                       value={confluenceForm.api_token}
                       onChange={(e) => setConfluenceForm({ ...confluenceForm, api_token: e.target.value })}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                      placeholder="PAT, API token, or password"
                     />
+                    <p className="text-xs text-gray-500 mt-1">For PAT: leave username empty. For basic auth: enter username + password</p>
                   </div>
                 </div>
 
@@ -1019,14 +1021,16 @@ export function IngestionPage() {
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">
-                      API Token
+                      Token / Password
                     </label>
                     <input
                       type="password"
                       value={jiraForm.api_token}
                       onChange={(e) => setJiraForm({ ...jiraForm, api_token: e.target.value })}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                      placeholder="PAT, API token, or password"
                     />
+                    <p className="text-xs text-gray-500 mt-1">For PAT: leave username empty. For basic auth: enter username + password</p>
                   </div>
                 </div>
 

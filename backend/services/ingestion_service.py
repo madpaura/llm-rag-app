@@ -264,11 +264,38 @@ class GitIngestionService:
             logger.warning(f"Failed to read {file_path}: {e}")
             return None
 
-class ConfluenceIngestionService:
-    """Service for ingesting Confluence pages."""
+class ConfluenceConnector:
+    """Connector for Confluence spaces."""
     
     def __init__(self):
         self.chunker = TextChunker()
+    
+    def _get_auth(self, username: str, api_token: str):
+        """
+        Get authentication for Confluence API requests.
+        
+        Supports:
+        - Personal Access Token (PAT): If username is empty/None, uses Bearer token auth
+        - Basic Auth: If username is provided, uses username:password/token
+        """
+        if not username or username.strip() == '':
+            # PAT authentication - use Bearer token
+            return None  # Will use headers instead
+        else:
+            # Basic auth with username and password/token
+            return (username, api_token)
+    
+    def _get_headers(self, username: str, api_token: str) -> dict:
+        """
+        Get headers for Confluence API requests.
+        
+        For PAT auth, adds Authorization: Bearer <token>
+        """
+        headers = {'Content-Type': 'application/json'}
+        if not username or username.strip() == '':
+            # PAT authentication - use Bearer token
+            headers['Authorization'] = f'Bearer {api_token}'
+        return headers
     
     async def ingest_space(
         self, 
@@ -299,8 +326,8 @@ class ConfluenceIngestionService:
             username = username or settings.CONFLUENCE_USERNAME if hasattr(settings, 'CONFLUENCE_USERNAME') else None
             api_token = api_token or settings.CONFLUENCE_API_TOKEN if hasattr(settings, 'CONFLUENCE_API_TOKEN') else None
             
-            if not all([base_url, username, api_token]):
-                return {"success": False, "error": "Missing Confluence credentials"}
+            if not all([base_url, api_token]):
+                return {"success": False, "error": "Missing Confluence credentials (base_url and token required)"}
             
             # Ensure base_url doesn't have trailing slash
             base_url = base_url.rstrip('/')
@@ -383,7 +410,10 @@ class ConfluenceIngestionService:
                 'expand': 'version,history,ancestors'
             }
             
-            response = requests.get(url, params=params, auth=(username, api_token))
+            auth = self._get_auth(username, api_token)
+            headers = self._get_headers(username, api_token)
+            
+            response = requests.get(url, params=params, auth=auth, headers=headers)
             response.raise_for_status()
             
             data = response.json()
@@ -419,7 +449,10 @@ class ConfluenceIngestionService:
                 url = f"{base_url}/rest/api/content/{page_id}"
                 params = {'expand': 'version,history,ancestors'}
                 
-                response = requests.get(url, params=params, auth=(username, api_token))
+                auth = self._get_auth(username, api_token)
+                headers = self._get_headers(username, api_token)
+                
+                response = requests.get(url, params=params, auth=auth, headers=headers)
                 response.raise_for_status()
                 
                 pages.append(response.json())
@@ -435,7 +468,10 @@ class ConfluenceIngestionService:
             url = f"{base_url}/rest/api/content/{page_id}"
             params = {'expand': 'body.storage'}
             
-            response = requests.get(url, params=params, auth=(username, api_token))
+            auth = self._get_auth(username, api_token)
+            headers = self._get_headers(username, api_token)
+            
+            response = requests.get(url, params=params, auth=auth, headers=headers)
             response.raise_for_status()
             
             data = response.json()
@@ -456,6 +492,33 @@ class JiraIngestionService:
     
     def __init__(self):
         self.chunker = TextChunker()
+    
+    def _get_auth(self, username: str, api_token: str):
+        """
+        Get authentication for JIRA API requests.
+        
+        Supports:
+        - Personal Access Token (PAT): If username is empty/None, uses Bearer token auth
+        - Basic Auth: If username is provided, uses username:password/token
+        """
+        if not username or username.strip() == '':
+            # PAT authentication - use Bearer token
+            return None  # Will use headers instead
+        else:
+            # Basic auth with username and password/token
+            return (username, api_token)
+    
+    def _get_headers(self, username: str, api_token: str) -> dict:
+        """
+        Get headers for JIRA API requests.
+        
+        For PAT auth, adds Authorization: Bearer <token>
+        """
+        headers = {'Content-Type': 'application/json'}
+        if not username or username.strip() == '':
+            # PAT authentication - use Bearer token
+            headers['Authorization'] = f'Bearer {api_token}'
+        return headers
     
     async def ingest_project(
         self, 
@@ -482,12 +545,23 @@ class JiraIngestionService:
             max_results: Maximum number of issues to fetch (None for all)
         """
         try:
-            base_url = base_url or settings.JIRA_BASE_URL if hasattr(settings, 'JIRA_BASE_URL') else None
-            username = username or settings.JIRA_USERNAME if hasattr(settings, 'JIRA_USERNAME') else None
-            api_token = api_token or settings.JIRA_API_TOKEN if hasattr(settings, 'JIRA_API_TOKEN') else None
+            # Debug logging
+            logger.info(f"[JIRA] ingest_project called with base_url={base_url}, username={username}, api_token={'***' if api_token else None}")
             
-            if not all([base_url, username, api_token]):
-                return {"success": False, "error": "Missing JIRA credentials"}
+            # Handle empty strings as None
+            base_url = base_url.strip() if base_url else None
+            username = username.strip() if username else None
+            api_token = api_token.strip() if api_token else None
+            
+            # Fall back to settings if not provided
+            base_url = base_url or (settings.JIRA_BASE_URL if hasattr(settings, 'JIRA_BASE_URL') else None)
+            username = username or (settings.JIRA_USERNAME if hasattr(settings, 'JIRA_USERNAME') else None)
+            api_token = api_token or (settings.JIRA_API_TOKEN if hasattr(settings, 'JIRA_API_TOKEN') else None)
+            
+            logger.info(f"[JIRA] After fallback: base_url={base_url}, username={username}, api_token={'***' if api_token else None}")
+            
+            if not base_url or not api_token:
+                return {"success": False, "error": f"Missing JIRA credentials (base_url={bool(base_url)}, token={bool(api_token)})"}
             
             # Ensure base_url doesn't have trailing slash
             base_url = base_url.rstrip('/')
@@ -583,7 +657,8 @@ class JiraIngestionService:
         logger.info(f"JIRA JQL: {jql}")
         
         while True:
-            url = f"{base_url}/rest/api/3/search"
+            # Use API v2 for JIRA Server compatibility (v3 is Cloud only)
+            url = f"{base_url}/rest/api/2/search"
             params = {
                 'jql': jql,
                 'startAt': start_at,
@@ -591,7 +666,10 @@ class JiraIngestionService:
                 'fields': 'summary,description,issuetype,status,priority,assignee,reporter,created,updated,labels,components,comment'
             }
             
-            response = requests.get(url, params=params, auth=(username, api_token))
+            auth = self._get_auth(username, api_token)
+            headers = self._get_headers(username, api_token)
+            
+            response = requests.get(url, params=params, auth=auth, headers=headers)
             response.raise_for_status()
             
             data = response.json()
@@ -998,7 +1076,7 @@ class IngestionOrchestrator:
     def __init__(self, workspace_id: int = None):
         self.workspace_id = workspace_id
         self.git_service = GitIngestionService()
-        self.confluence_service = ConfluenceIngestionService()
+        self.confluence_service = ConfluenceConnector()
         self.jira_service = JiraIngestionService()
         self.document_service = DocumentIngestionService()
         # VectorService is now workspace-isolated
@@ -1073,7 +1151,7 @@ class IngestionOrchestrator:
                 )
             elif data_source.source_type == "jira":
                 config = data_source.config or {}
-                logger.info(f"[JIRA] Fetching issues from project: {config.get('project_key')}")
+                logger.info(f"[JIRA] Fetching issues from project: {config.get('project_key')}, config keys: {list(config.keys())}")
                 result = await self.jira_service.ingest_project(
                     config.get('project_key'),
                     data_source.workspace_id,
