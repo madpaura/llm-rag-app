@@ -540,4 +540,106 @@ export const api = {
     const response = await apiClient.get(`/api/ingestion/code/call-graph/${workspaceId}`);
     return response.data;
   },
+
+  // Admin - User Management
+  async getUsers(): Promise<AdminUser[]> {
+    const response = await apiClient.get('/api/admin/users');
+    return response.data;
+  },
+
+  async getUser(userId: number): Promise<AdminUserDetail> {
+    const response = await apiClient.get(`/api/admin/users/${userId}`);
+    return response.data;
+  },
+
+  async createUser(data: CreateUserRequest): Promise<AdminUser> {
+    const response = await apiClient.post('/api/admin/users', data);
+    return response.data;
+  },
+
+  async updateUser(userId: number, data: UpdateUserRequest): Promise<AdminUser> {
+    const response = await apiClient.put(`/api/admin/users/${userId}`, data);
+    return response.data;
+  },
+
+  async deleteUser(userId: number): Promise<{ message: string }> {
+    const response = await apiClient.delete(`/api/admin/users/${userId}`);
+    return response.data;
+  },
+
+  async getUserWorkspaces(userId: number): Promise<{
+    user_id: number;
+    username: string;
+    workspaces: AdminWorkspace[];
+  }> {
+    const response = await apiClient.get(`/api/admin/users/${userId}/workspaces`);
+    return response.data;
+  },
+
+  async getAllWorkspaces(): Promise<AdminWorkspace[]> {
+    const response = await apiClient.get('/api/admin/workspaces');
+    return response.data;
+  },
+
+  async getAvailablePermissions(): Promise<{
+    permissions: Array<{ key: string; name: string; description: string }>;
+  }> {
+    const response = await apiClient.get('/api/admin/permissions/available');
+    return response.data;
+  },
 };
+
+// Admin Types
+export interface AdminUser {
+  id: number;
+  username: string;
+  email: string;
+  full_name?: string;
+  is_active: boolean;
+  is_admin: boolean;
+  permissions: Record<string, boolean>;
+  workspace_count: number;
+  created_at?: string;
+}
+
+export interface AdminUserDetail extends AdminUser {
+  workspaces: Array<{
+    id: number;
+    name: string;
+    description?: string;
+    role: string;
+    joined_at?: string;
+  }>;
+  updated_at?: string;
+}
+
+export interface AdminWorkspace {
+  id: number;
+  name: string;
+  description?: string;
+  is_active: boolean;
+  member_count?: number;
+  role?: string;
+  created_by?: string;
+  created_at?: string;
+  joined_at?: string;
+}
+
+export interface CreateUserRequest {
+  username: string;
+  email: string;
+  password: string;
+  full_name?: string;
+  is_admin?: boolean;
+  permissions?: Record<string, boolean>;
+}
+
+export interface UpdateUserRequest {
+  username?: string;
+  email?: string;
+  password?: string;
+  full_name?: string;
+  is_active?: boolean;
+  is_admin?: boolean;
+  permissions?: Record<string, boolean>;
+}

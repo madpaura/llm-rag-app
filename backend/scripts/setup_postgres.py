@@ -68,6 +68,49 @@ def create_database(admin_user: str, admin_password: str, host: str, port: int,
     print("Database setup complete!")
 
 
+def test_connectivity():
+    """Test database connectivity before setup."""
+    print("Testing database connectivity...")
+    
+    from core.config import get_settings
+    import psycopg2
+    from urllib.parse import urlparse
+    
+    settings = get_settings()
+    db_url = settings.DATABASE_URL
+    
+    if not db_url.startswith("postgresql://"):
+        print("Error: DATABASE_URL must be a PostgreSQL connection string")
+        return False
+    
+    try:
+        parsed = urlparse(db_url)
+        conn = psycopg2.connect(
+            host=parsed.hostname,
+            port=parsed.port or 5432,
+            user=parsed.username,
+            password=parsed.password,
+            database=parsed.path[1:]
+        )
+        
+        cursor = conn.cursor()
+        cursor.execute("SELECT version()")
+        version = cursor.fetchone()[0]
+        
+        print(f"✓ Connected to PostgreSQL")
+        print(f"  Host: {parsed.hostname}:{parsed.port or 5432}")
+        print(f"  Database: {parsed.path[1:]}")
+        print(f"  Version: {version.split(',')[0]}")
+        
+        cursor.close()
+        conn.close()
+        return True
+        
+    except Exception as e:
+        print(f"✗ Connection failed: {e}")
+        return False
+
+
 def init_tables():
     """Initialize database tables using SQLAlchemy models."""
     print("Initializing database tables...")
@@ -166,6 +209,47 @@ def migrate_from_sqlite(sqlite_path: str):
         pg_session.close()
 
 
+def create_default_admin_user():
+    """Create a default admin user if no users exist."""
+    print("\nChecking for existing users...")
+    
+    from sqlalchemy.orm import Session
+    from core.database import SessionLocal, User
+    
+    session = SessionLocal()
+    
+    try:
+        user_count = session.query(User).count()
+        
+        if user_count == 0:
+            print("No users found. Creating default admin user...")
+            
+            admin = User(
+                username="admin",
+                email="admin@example.com",
+                full_name="System Administrator",
+                is_admin=True,
+                is_active=True
+            )
+            
+            session.add(admin)
+            session.commit()
+            
+            print("✓ Default admin user created:")
+            print("  Username: admin")
+            print("  Email: admin@example.com")
+            print("  Password: (not set - configure authentication separately)")
+            print("\n  ⚠ IMPORTANT: Change default credentials in production!")
+        else:
+            print(f"✓ Found {user_count} existing user(s)")
+        
+    except Exception as e:
+        print(f"Error creating default user: {e}")
+        session.rollback()
+    finally:
+        session.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description='PostgreSQL database setup for RAG application')
     parser.add_argument('--admin-user', default='postgres', help='PostgreSQL admin username')
@@ -177,8 +261,18 @@ def main():
     parser.add_argument('--db-password', default='rag_password', help='Database user password')
     parser.add_argument('--skip-create', action='store_true', help='Skip database/user creation')
     parser.add_argument('--migrate-sqlite', type=str, help='Path to SQLite database to migrate from')
+    parser.add_argument('--test-only', action='store_true', help='Only test connectivity, do not create anything')
+    parser.add_argument('--create-admin', action='store_true', help='Create default admin user')
     
     args = parser.parse_args()
+    
+    # Test connectivity only
+    if args.test_only:
+        print("\n" + "="*50)
+        print("Testing PostgreSQL Connectivity")
+        print("="*50 + "\n")
+        success = test_connectivity()
+        return 0 if success else 1
     
     # Use environment variables if available
     admin_user = os.environ.get('POSTGRES_ADMIN_USER', args.admin_user)
@@ -206,8 +300,22 @@ def main():
             print(f"  GRANT ALL PRIVILEGES ON DATABASE {db_name} TO {db_user};")
             return 1
     
+    # Test connectivity before proceeding
+    print("\n" + "="*50)
+    print("Testing Database Connectivity")
+    print("="*50 + "\n")
+    
+    if not test_connectivity():
+        print("\n⚠ Warning: Could not connect to database.")
+        print("Please check your DATABASE_URL in .env file or environment variables.")
+        return 1
+    
     # Initialize tables
     init_tables()
+    
+    # Create default admin user if requested
+    if args.create_admin:
+        create_default_admin_user()
     
     # Migrate from SQLite if requested
     if args.migrate_sqlite:
@@ -218,6 +326,10 @@ def main():
     print("="*50)
     print(f"\nUpdate your .env file with:")
     print(f"DATABASE_URL=postgresql://{db_user}:{db_password}@{host}:{port}/{db_name}")
+    print(f"\nUseful commands:")
+    print(f"  Test connection: python scripts/test_postgres_connection.py")
+    print(f"  Add user: python scripts/add_postgres_user.py add --username USER --email EMAIL")
+    print(f"  List users: python scripts/add_postgres_user.py list")
     
     return 0
 

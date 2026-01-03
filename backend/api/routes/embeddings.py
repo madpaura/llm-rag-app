@@ -2,36 +2,76 @@
 Embeddings API routes for viewing and navigating document embeddings.
 """
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 import structlog
 
-from core.database import get_db, DataSource, Document, DocumentChunk, Workspace, CodeUnit
+from core.database import get_db, DataSource, Document, DocumentChunk, Workspace, CodeUnit, User, WorkspaceMember
+from api.routes.auth import get_current_user
 
 logger = structlog.get_logger()
 router = APIRouter()
-security = HTTPBearer()
+
+
+def check_embeddings_permission(user: User):
+    """Check if user has permission to view embeddings."""
+    # Admins always have access
+    if user.is_admin:
+        return True
+    
+    # Check user permissions
+    permissions = user.permissions or {}
+    if not permissions.get("can_view_embeddings", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have permission to view embeddings"
+        )
+    return True
+
+
+def check_workspace_access(workspace_id: int, user: User, db: Session) -> Workspace:
+    """Check if user has access to workspace."""
+    workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+    if not workspace:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workspace not found"
+        )
+    
+    if user.is_admin:
+        return workspace
+    
+    member = db.query(WorkspaceMember)\
+        .filter(WorkspaceMember.workspace_id == workspace_id)\
+        .filter(WorkspaceMember.user_id == user.id)\
+        .first()
+    
+    if not member:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this workspace"
+        )
+    
+    return workspace
 
 
 @router.get("/workspace/{workspace_id}")
 async def get_workspace_embeddings(
     workspace_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ) -> List[Dict[str, Any]]:
     """Get all documents with embedding info for a workspace.
     
     For code files (C/C++), shows code units (functions, classes, files) instead of simple chunks.
+    Requires can_view_embeddings permission.
     """
     try:
-        # Verify workspace exists
-        workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
-        if not workspace:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Workspace not found"
-            )
+        # Check embeddings permission
+        check_embeddings_permission(current_user)
+        
+        # Verify workspace access
+        workspace = check_workspace_access(workspace_id, current_user, db)
         
         # Get all data sources for the workspace
         data_sources = db.query(DataSource).filter(
@@ -94,15 +134,19 @@ async def get_workspace_embeddings(
 @router.get("/document/{document_id}/chunks")
 async def get_document_chunks(
     document_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ) -> List[Dict[str, Any]]:
     """Get all chunks/code units for a document.
     
     For code files with AST-based parsing, returns code units (functions, classes, files)
     with their summaries. For other files, returns simple text chunks.
+    Requires can_view_embeddings permission.
     """
     try:
+        # Check embeddings permission
+        check_embeddings_permission(current_user)
+        
         # Verify document exists
         document = db.query(Document).filter(Document.id == document_id).first()
         if not document:
@@ -177,18 +221,16 @@ async def get_document_chunks(
 @router.get("/stats/{workspace_id}")
 async def get_embedding_stats(
     workspace_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
-    """Get embedding statistics for a workspace."""
+    """Get embedding statistics for a workspace. Requires can_view_embeddings permission."""
     try:
-        # Verify workspace exists
-        workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
-        if not workspace:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Workspace not found"
-            )
+        # Check embeddings permission
+        check_embeddings_permission(current_user)
+        
+        # Verify workspace access
+        workspace = check_workspace_access(workspace_id, current_user, db)
         
         # Get all data sources for the workspace
         data_sources = db.query(DataSource).filter(

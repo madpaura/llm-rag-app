@@ -2,17 +2,16 @@
 Workspace management endpoints.
 """
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Optional
 import structlog
 
 from core.database import get_db, Workspace, WorkspaceMember, User, DataSource, Document, DocumentChunk, ChatSession, ChatMessage
+from api.routes.auth import get_current_user
 
 logger = structlog.get_logger()
 router = APIRouter()
-security = HTTPBearer()
 
 class WorkspaceCreate(BaseModel):
     name: str
@@ -37,19 +36,22 @@ class WorkspaceMemberResponse(BaseModel):
 
 @router.get("/", response_model=List[WorkspaceResponse])
 async def get_user_workspaces(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get workspaces for current user."""
-    # TODO: Get user from token
-    user_id = 1  # Mock user ID
+    """Get workspaces for current user. Admins see all workspaces, regular users see only their own."""
+    user_id = current_user.id
     
-    # Query workspaces where user is a member
-    workspaces = db.query(Workspace)\
-        .join(WorkspaceMember)\
-        .filter(WorkspaceMember.user_id == user_id)\
-        .filter(Workspace.is_active == True)\
-        .all()
+    if current_user.is_admin:
+        # Admin users can see all workspaces
+        workspaces = db.query(Workspace).filter(Workspace.is_active == True).all()
+    else:
+        # Regular users only see workspaces they are members of
+        workspaces = db.query(Workspace)\
+            .join(WorkspaceMember)\
+            .filter(WorkspaceMember.user_id == user_id)\
+            .filter(Workspace.is_active == True)\
+            .all()
     
     result = []
     for workspace in workspaces:
@@ -62,6 +64,9 @@ async def get_user_workspaces(
             .filter(WorkspaceMember.workspace_id == workspace.id)\
             .count()
         
+        # For admin viewing other's workspaces, show as "admin" role
+        role = member.role if member else ("admin" if current_user.is_admin else "viewer")
+        
         result.append(WorkspaceResponse(
             id=workspace.id,
             name=workspace.name,
@@ -69,7 +74,7 @@ async def get_user_workspaces(
             is_active=workspace.is_active,
             created_at=workspace.created_at.isoformat(),
             member_count=member_count,
-            role=member.role if member else "viewer"
+            role=role
         ))
     
     return result
@@ -77,12 +82,11 @@ async def get_user_workspaces(
 @router.post("/", response_model=WorkspaceResponse)
 async def create_workspace(
     workspace_data: WorkspaceCreate,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Create a new workspace."""
-    # TODO: Get user from token
-    user_id = 1  # Mock user ID
+    user_id = current_user.id
     
     # Check if workspace name already exists
     existing = db.query(Workspace).filter(Workspace.name == workspace_data.name).first()
@@ -120,21 +124,42 @@ async def create_workspace(
         role="admin"
     )
 
-@router.get("/{workspace_id}")
-async def get_workspace(
-    workspace_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: Session = Depends(get_db)
-):
-    """Get workspace details."""
-    # TODO: Check user access to workspace
-    
+def check_workspace_access(workspace_id: int, user: User, db: Session) -> Workspace:
+    """Check if user has access to workspace. Returns workspace if access granted."""
     workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
     if not workspace:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Workspace not found"
         )
+    
+    # Admins have access to all workspaces
+    if user.is_admin:
+        return workspace
+    
+    # Check if user is a member of this workspace
+    member = db.query(WorkspaceMember)\
+        .filter(WorkspaceMember.workspace_id == workspace_id)\
+        .filter(WorkspaceMember.user_id == user.id)\
+        .first()
+    
+    if not member:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this workspace"
+        )
+    
+    return workspace
+
+
+@router.get("/{workspace_id}")
+async def get_workspace(
+    workspace_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get workspace details."""
+    workspace = check_workspace_access(workspace_id, current_user, db)
     
     return {
         "id": workspace.id,
@@ -147,11 +172,11 @@ async def get_workspace(
 @router.get("/{workspace_id}/members", response_model=List[WorkspaceMemberResponse])
 async def get_workspace_members(
     workspace_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Get workspace members."""
-    # TODO: Check user access to workspace
+    check_workspace_access(workspace_id, current_user, db)
     
     members = db.query(WorkspaceMember, User)\
         .join(User)\
@@ -175,15 +200,14 @@ async def get_workspace_members(
 @router.delete("/{workspace_id}")
 async def delete_workspace(
     workspace_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Delete a workspace and all associated data.
     This includes: data sources, documents, document chunks, chat sessions, chat messages, and members.
     """
-    # TODO: Get user from token
-    user_id = 1  # Mock user ID
+    user_id = current_user.id
     
     # Check if workspace exists
     workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
@@ -193,17 +217,21 @@ async def delete_workspace(
             detail="Workspace not found"
         )
     
-    # Check if user is admin of the workspace
-    member = db.query(WorkspaceMember)\
-        .filter(WorkspaceMember.workspace_id == workspace_id)\
-        .filter(WorkspaceMember.user_id == user_id)\
-        .first()
-    
-    if not member or member.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only workspace admins can delete workspaces"
-        )
+    # System admins can delete any workspace
+    if current_user.is_admin:
+        pass  # Allow deletion
+    else:
+        # Check if user is admin of the workspace
+        member = db.query(WorkspaceMember)\
+            .filter(WorkspaceMember.workspace_id == workspace_id)\
+            .filter(WorkspaceMember.user_id == user_id)\
+            .first()
+        
+        if not member or member.role != "admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only workspace admins can delete workspaces"
+            )
     
     try:
         # Delete chat messages for all sessions in this workspace

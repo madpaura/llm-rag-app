@@ -1,18 +1,398 @@
 """
-Admin API routes for backup, cache management, and system monitoring.
+Admin API routes for backup, cache management, user management, and system monitoring.
 """
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
-from typing import Dict, Any, List
+from sqlalchemy.orm import Session
+from typing import Dict, Any, List, Optional
+from pydantic import BaseModel
 import structlog
 
 from core.backup import get_backup_service, scheduled_backup
 from core.cache import get_all_cache_stats, cleanup_caches, get_embedding_cache, get_query_cache
 from core.service_registry import get_registry
-from api.routes.auth import get_current_user
-from core.database import User
+from api.routes.auth import get_current_user, require_admin
+from core.database import User, Workspace, WorkspaceMember, get_db
 
 logger = structlog.get_logger()
 router = APIRouter()
+
+
+# ============== User Management Schemas ==============
+
+class CreateUserRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+    full_name: Optional[str] = None
+    is_admin: bool = False
+    permissions: Optional[Dict[str, bool]] = None
+
+
+class UpdateUserRequest(BaseModel):
+    username: Optional[str] = None
+    email: Optional[str] = None
+    password: Optional[str] = None
+    full_name: Optional[str] = None
+    is_active: Optional[bool] = None
+    is_admin: Optional[bool] = None
+    permissions: Optional[Dict[str, bool]] = None
+
+
+class UserListResponse(BaseModel):
+    id: int
+    username: str
+    email: str
+    full_name: Optional[str]
+    is_active: bool
+    is_admin: bool
+    permissions: Optional[Dict[str, Any]]
+    workspace_count: int
+    created_at: Optional[str]
+
+
+# ============== User Management Endpoints ==============
+
+@router.get("/users", response_model=List[UserListResponse])
+async def list_users(
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """List all users with their workspace counts."""
+    users = db.query(User).all()
+    
+    result = []
+    for user in users:
+        workspace_count = db.query(WorkspaceMember).filter(
+            WorkspaceMember.user_id == user.id
+        ).count()
+        
+        result.append(UserListResponse(
+            id=user.id,
+            username=user.username,
+            email=user.email,
+            full_name=user.full_name,
+            is_active=user.is_active,
+            is_admin=user.is_admin,
+            permissions=user.permissions or {},
+            workspace_count=workspace_count,
+            created_at=user.created_at.isoformat() if user.created_at else None
+        ))
+    
+    return result
+
+
+@router.get("/users/{user_id}")
+async def get_user(
+    user_id: int,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Get detailed user information including workspaces."""
+    user = db.query(User).filter(User.id == user_id).first()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Get user's workspaces
+    memberships = db.query(WorkspaceMember).filter(
+        WorkspaceMember.user_id == user_id
+    ).all()
+    
+    workspaces = []
+    for membership in memberships:
+        workspace = db.query(Workspace).filter(
+            Workspace.id == membership.workspace_id
+        ).first()
+        if workspace:
+            workspaces.append({
+                "id": workspace.id,
+                "name": workspace.name,
+                "description": workspace.description,
+                "role": membership.role,
+                "joined_at": membership.joined_at.isoformat() if membership.joined_at else None
+            })
+    
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "full_name": user.full_name,
+        "is_active": user.is_active,
+        "is_admin": user.is_admin,
+        "permissions": user.permissions or {},
+        "workspaces": workspaces,
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+        "updated_at": user.updated_at.isoformat() if user.updated_at else None
+    }
+
+
+@router.post("/users")
+async def create_user(
+    request: CreateUserRequest,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Create a new user."""
+    # Check if username or email already exists
+    existing = db.query(User).filter(
+        (User.username == request.username) | (User.email == request.email)
+    ).first()
+    
+    if existing:
+        if existing.username == request.username:
+            raise HTTPException(status_code=400, detail="Username already exists")
+        raise HTTPException(status_code=400, detail="Email already exists")
+    
+    # Default permissions for new users
+    default_permissions = {
+        "can_view_embeddings": False,
+        "can_manage_workspaces": True,
+        "can_manage_users": False,
+        "can_view_all_workspaces": False
+    }
+    
+    # Merge with provided permissions
+    permissions = {**default_permissions, **(request.permissions or {})}
+    
+    # Create user
+    new_user = User(
+        username=request.username,
+        email=request.email,
+        password=request.password,  # Plain text
+        full_name=request.full_name,
+        is_admin=request.is_admin,
+        is_active=True,
+        permissions=permissions
+    )
+    
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    
+    logger.info(f"Admin {current_user.username} created user: {new_user.username}")
+    
+    return {
+        "id": new_user.id,
+        "username": new_user.username,
+        "email": new_user.email,
+        "full_name": new_user.full_name,
+        "is_active": new_user.is_active,
+        "is_admin": new_user.is_admin,
+        "permissions": new_user.permissions,
+        "message": "User created successfully"
+    }
+
+
+@router.put("/users/{user_id}")
+async def update_user(
+    user_id: int,
+    request: UpdateUserRequest,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Update user information."""
+    user = db.query(User).filter(User.id == user_id).first()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Prevent admin from deactivating themselves
+    if user.id == current_user.id and request.is_active == False:
+        raise HTTPException(status_code=400, detail="Cannot deactivate your own account")
+    
+    # Prevent removing admin from the only admin
+    if user.id == current_user.id and request.is_admin == False:
+        admin_count = db.query(User).filter(User.is_admin == True).count()
+        if admin_count <= 1:
+            raise HTTPException(status_code=400, detail="Cannot remove admin role from the only admin")
+    
+    # Check for duplicate username/email
+    if request.username and request.username != user.username:
+        existing = db.query(User).filter(User.username == request.username).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Username already exists")
+    
+    if request.email and request.email != user.email:
+        existing = db.query(User).filter(User.email == request.email).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Email already exists")
+    
+    # Update fields
+    if request.username is not None:
+        user.username = request.username
+    if request.email is not None:
+        user.email = request.email
+    if request.password is not None:
+        user.password = request.password  # Plain text
+    if request.full_name is not None:
+        user.full_name = request.full_name
+    if request.is_active is not None:
+        user.is_active = request.is_active
+    if request.is_admin is not None:
+        user.is_admin = request.is_admin
+    if request.permissions is not None:
+        # Merge permissions
+        current_perms = user.permissions or {}
+        user.permissions = {**current_perms, **request.permissions}
+    
+    db.commit()
+    db.refresh(user)
+    
+    logger.info(f"Admin {current_user.username} updated user: {user.username}")
+    
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "full_name": user.full_name,
+        "is_active": user.is_active,
+        "is_admin": user.is_admin,
+        "permissions": user.permissions,
+        "message": "User updated successfully"
+    }
+
+
+@router.delete("/users/{user_id}")
+async def delete_user(
+    user_id: int,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Delete a user."""
+    user = db.query(User).filter(User.id == user_id).first()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Prevent admin from deleting themselves
+    if user.id == current_user.id:
+        raise HTTPException(status_code=400, detail="Cannot delete your own account")
+    
+    # Prevent deleting the only admin
+    if user.is_admin:
+        admin_count = db.query(User).filter(User.is_admin == True).count()
+        if admin_count <= 1:
+            raise HTTPException(status_code=400, detail="Cannot delete the only admin")
+    
+    username = user.username
+    db.delete(user)
+    db.commit()
+    
+    logger.info(f"Admin {current_user.username} deleted user: {username}")
+    
+    return {"message": f"User '{username}' deleted successfully"}
+
+
+@router.get("/users/{user_id}/workspaces")
+async def get_user_workspaces(
+    user_id: int,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Get all workspaces for a specific user."""
+    user = db.query(User).filter(User.id == user_id).first()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    memberships = db.query(WorkspaceMember).filter(
+        WorkspaceMember.user_id == user_id
+    ).all()
+    
+    workspaces = []
+    for membership in memberships:
+        workspace = db.query(Workspace).filter(
+            Workspace.id == membership.workspace_id
+        ).first()
+        if workspace:
+            workspaces.append({
+                "id": workspace.id,
+                "name": workspace.name,
+                "description": workspace.description,
+                "is_active": workspace.is_active,
+                "role": membership.role,
+                "joined_at": membership.joined_at.isoformat() if membership.joined_at else None,
+                "created_at": workspace.created_at.isoformat() if workspace.created_at else None
+            })
+    
+    return {
+        "user_id": user_id,
+        "username": user.username,
+        "workspaces": workspaces
+    }
+
+
+@router.get("/workspaces")
+async def list_all_workspaces(
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """List all workspaces (admin only)."""
+    workspaces = db.query(Workspace).all()
+    
+    result = []
+    for ws in workspaces:
+        member_count = db.query(WorkspaceMember).filter(
+            WorkspaceMember.workspace_id == ws.id
+        ).count()
+        
+        # Get creator info
+        creator = db.query(User).filter(User.id == ws.created_by).first() if ws.created_by else None
+        
+        result.append({
+            "id": ws.id,
+            "name": ws.name,
+            "description": ws.description,
+            "is_active": ws.is_active,
+            "member_count": member_count,
+            "created_by": creator.username if creator else None,
+            "created_at": ws.created_at.isoformat() if ws.created_at else None
+        })
+    
+    return result
+
+
+# ============== Permission Constants ==============
+
+@router.get("/permissions/available")
+async def get_available_permissions(
+    current_user: User = Depends(require_admin)
+):
+    """Get list of available permissions that can be assigned to users."""
+    return {
+        "permissions": [
+            {
+                "key": "can_view_embeddings",
+                "name": "View Embeddings",
+                "description": "Allow user to view and manage embeddings"
+            },
+            {
+                "key": "can_manage_workspaces",
+                "name": "Manage Workspaces",
+                "description": "Allow user to create and manage their own workspaces"
+            },
+            {
+                "key": "can_manage_users",
+                "name": "Manage Users",
+                "description": "Allow user to manage other users (admin only)"
+            },
+            {
+                "key": "can_view_all_workspaces",
+                "name": "View All Workspaces",
+                "description": "Allow user to view all workspaces in the system"
+            },
+            {
+                "key": "can_ingest_data",
+                "name": "Ingest Data",
+                "description": "Allow user to ingest documents and data sources"
+            },
+            {
+                "key": "can_query",
+                "name": "Query Knowledge Base",
+                "description": "Allow user to query the RAG system"
+            }
+        ]
+    }
 
 
 # ============== Backup Endpoints ==============

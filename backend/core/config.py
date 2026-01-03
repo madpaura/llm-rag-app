@@ -107,6 +107,11 @@ class Settings(BaseSettings):
     BACKUP_RETENTION_COUNT: int = 5
     AUTO_BACKUP_ENABLED: bool = False
     
+    # Default Admin User (from .env)
+    ADMIN_USERNAME: str = "admin"
+    ADMIN_EMAIL: str = "admin@example.com"
+    ADMIN_PASSWORD: str = "admin123"
+    
     class Config:
         env_file = ".env"
         case_sensitive = True

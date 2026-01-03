@@ -41,6 +41,7 @@ mermaid.initialize({
  * Sanitize mermaid chart to handle special characters and LLM artifacts.
  * - Removes source citations like 【Source 1】 or [Source 1] that LLMs add
  * - Handles special characters in node labels
+ * - Escapes reserved keywords in sequence diagram messages
  */
 function sanitizeMermaidChart(chart: string): string {
   // First, remove LLM source citations that break mermaid parsing
@@ -55,6 +56,33 @@ function sanitizeMermaidChart(chart: string): string {
     .replace(/  +/g, ' ')
     // Clean up empty lines
     .replace(/^\s*[\r\n]/gm, '\n');
+
+  // Check if this is a sequence diagram
+  const isSequenceDiagram = /sequenceDiagram/i.test(sanitized);
+  
+  if (isSequenceDiagram) {
+    // Reserved keywords in Mermaid sequence diagrams that can appear in messages
+    // These need to be escaped when they appear as part of message text
+    const reservedKeywords = ['loop', 'alt', 'else', 'opt', 'par', 'and', 'rect', 'end', 'note', 'activate', 'deactivate'];
+    
+    // Process line by line for sequence diagrams
+    const lines = sanitized.split('\n');
+    sanitized = lines.map(line => {
+      // Check if this is a message line (contains ->> or -->> or ->) 
+      const messageMatch = line.match(/^(\s*)(\w+)([-]+>>?[-]*)(\w+):\s*(.*)$/);
+      if (messageMatch) {
+        const [, indent, from, arrow, to, message] = messageMatch;
+        // Check if message starts with a reserved keyword (case insensitive)
+        const firstWord = message.trim().split(/[\s(]/)[0].toLowerCase();
+        if (reservedKeywords.includes(firstWord)) {
+          // Wrap the entire message in quotes to escape it
+          const escapedMessage = message.replace(/"/g, "'");
+          return `${indent}${from}${arrow}${to}: "${escapedMessage}"`;
+        }
+      }
+      return line;
+    }).join('\n');
+  }
 
   // Handle special characters in flowchart node labels
   sanitized = sanitized.replace(

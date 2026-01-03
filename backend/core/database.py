@@ -77,9 +77,12 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True, nullable=False)
     username = Column(String, unique=True, index=True, nullable=False)
+    password = Column(String, nullable=False)  # Plain text password
     full_name = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
     is_admin = Column(Boolean, default=False)
+    # User permissions as JSON: {"can_view_embeddings": true, "can_manage_workspaces": true, ...}
+    permissions = Column(JSON, nullable=True, default={})
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
@@ -252,3 +255,84 @@ async def init_db():
     logger.info("Creating database tables...")
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables created successfully")
+
+
+def check_db_connectivity() -> dict:
+    """Check database connectivity."""
+    try:
+        from sqlalchemy import text
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        db.close()
+        return {"connected": True, "error": None}
+    except Exception as e:
+        logger.error(f"Database connectivity check failed: {e}")
+        return {"connected": False, "error": str(e)}
+
+
+def ensure_admin_user():
+    """
+    Ensure at least one admin user exists.
+    Creates default admin from .env settings if no admin exists.
+    If admin user exists by email/username but is not admin, promote them.
+    """
+    db = SessionLocal()
+    try:
+        # Check if any admin user exists
+        admin_exists = db.query(User).filter(User.is_admin == True).first()
+        
+        if admin_exists:
+            logger.info(f"Admin user already exists: {admin_exists.username}")
+            return {"created": False, "username": admin_exists.username}
+        
+        logger.info("No admin user found. Checking for existing user to promote...")
+        
+        # Check if user with admin email/username already exists
+        existing_user = db.query(User).filter(
+            (User.email == settings.ADMIN_EMAIL) | (User.username == settings.ADMIN_USERNAME)
+        ).first()
+        
+        if existing_user:
+            # Promote existing user to admin
+            logger.info(f"Promoting existing user '{existing_user.username}' to admin...")
+            existing_user.is_admin = True
+            existing_user.password = settings.ADMIN_PASSWORD
+            existing_user.permissions = {
+                "can_view_embeddings": True,
+                "can_manage_workspaces": True,
+                "can_manage_users": True,
+                "can_view_all_workspaces": True
+            }
+            db.commit()
+            logger.info(f"User '{existing_user.username}' promoted to admin")
+            return {"created": False, "promoted": True, "username": existing_user.username}
+        
+        # Create new admin user
+        logger.info("Creating new admin user...")
+        admin_user = User(
+            username=settings.ADMIN_USERNAME,
+            email=settings.ADMIN_EMAIL,
+            password=settings.ADMIN_PASSWORD,
+            full_name="System Administrator",
+            is_admin=True,
+            is_active=True,
+            permissions={
+                "can_view_embeddings": True,
+                "can_manage_workspaces": True,
+                "can_manage_users": True,
+                "can_view_all_workspaces": True
+            }
+        )
+        
+        db.add(admin_user)
+        db.commit()
+        
+        logger.info(f"Default admin user created: {settings.ADMIN_USERNAME}")
+        return {"created": True, "username": settings.ADMIN_USERNAME}
+            
+    except Exception as e:
+        logger.error(f"Error ensuring admin user: {e}")
+        db.rollback()
+        return {"created": False, "error": str(e)}
+    finally:
+        db.close()

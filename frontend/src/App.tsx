@@ -9,6 +9,7 @@ import { WorkspaceView } from './pages/WorkspaceView';
 import { IngestionPage } from './pages/IngestionPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { EmbeddingsPage } from './pages/EmbeddingsPage';
+import { AdminPage } from './pages/AdminPage';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import './App.css';
 
@@ -47,6 +48,7 @@ function App() {
                 <Route path="workspace/:workspaceId" element={<WorkspaceView />} />
                 <Route path="workspace/:workspaceId/ingest" element={<IngestionPage />} />
                 <Route path="workspace/:workspaceId/embeddings" element={<EmbeddingsPage />} />
+                <Route path="admin" element={<AdminPage />} />
               </Route>
             </Routes>
           </div>

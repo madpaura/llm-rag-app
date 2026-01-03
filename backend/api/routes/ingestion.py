@@ -2,7 +2,6 @@
 Data ingestion endpoints.
 """
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -13,15 +12,41 @@ from pathlib import Path
 from datetime import datetime
 import asyncio
 
-from core.database import get_db, DataSource, Workspace, Document, DocumentChunk, CodeUnit, CodeCallGraph
+from core.database import get_db, DataSource, Workspace, Document, DocumentChunk, CodeUnit, CodeCallGraph, User, WorkspaceMember
 from core.config import get_settings
 from services.ingestion_service import IngestionOrchestrator
 from services.code_ingestion_service import CodeIngestionService
+from api.routes.auth import get_current_user
 
 logger = structlog.get_logger()
 router = APIRouter()
-security = HTTPBearer()
 settings = get_settings()
+
+
+def check_workspace_access(workspace_id: int, user: User, db: Session) -> Workspace:
+    """Check if user has access to workspace."""
+    workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+    if not workspace:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workspace not found"
+        )
+    
+    if user.is_admin:
+        return workspace
+    
+    member = db.query(WorkspaceMember)\
+        .filter(WorkspaceMember.workspace_id == workspace_id)\
+        .filter(WorkspaceMember.user_id == user.id)\
+        .first()
+    
+    if not member:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this workspace"
+        )
+    
+    return workspace
 
 # In-memory progress tracking store
 _ingestion_progress: Dict[int, Dict[str, Any]] = {}
@@ -117,11 +142,11 @@ class DataSourceResponse(BaseModel):
 @router.get("/sources/{workspace_id}", response_model=List[DataSourceResponse])
 async def get_data_sources(
     workspace_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Get all data sources for a workspace."""
-    # TODO: Check user access to workspace
+    check_workspace_access(workspace_id, current_user, db)
     
     sources = db.query(DataSource)\
         .filter(DataSource.workspace_id == workspace_id)\
@@ -145,7 +170,7 @@ async def get_data_sources(
 @router.get("/progress/{data_source_id}")
 async def get_ingestion_progress(
     data_source_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Get the progress of an ongoing ingestion job."""
@@ -184,7 +209,7 @@ async def get_ingestion_progress(
 @router.post("/cancel/{data_source_id}")
 async def cancel_ingestion(
     data_source_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Cancel an ongoing ingestion job."""
@@ -223,10 +248,12 @@ async def cancel_ingestion(
 @router.get("/active/{workspace_id}")
 async def get_active_ingestions(
     workspace_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Get all active/in-progress ingestion jobs for a workspace."""
+    check_workspace_access(workspace_id, current_user, db)
+    
     # Get data sources that are processing
     active_sources = db.query(DataSource).filter(
         DataSource.workspace_id == workspace_id,
@@ -250,18 +277,13 @@ async def get_active_ingestions(
 @router.post("/git")
 async def ingest_git_repository(
     request: GitIngestionRequest,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Ingest a Git repository."""
     try:
         # Verify workspace exists and user has access
-        workspace = db.query(Workspace).filter(Workspace.id == request.workspace_id).first()
-        if not workspace:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Workspace not found"
-            )
+        workspace = check_workspace_access(request.workspace_id, current_user, db)
         
         # Create data source record
         config = {
@@ -325,18 +347,13 @@ async def ingest_git_repository(
 @router.post("/confluence")
 async def ingest_confluence_space(
     request: ConfluenceIngestionRequest,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Ingest a Confluence space."""
     try:
         # Verify workspace exists and user has access
-        workspace = db.query(Workspace).filter(Workspace.id == request.workspace_id).first()
-        if not workspace:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Workspace not found"
-            )
+        workspace = check_workspace_access(request.workspace_id, current_user, db)
         
         # Create data source record
         config = {
@@ -380,18 +397,13 @@ async def ingest_confluence_space(
 @router.post("/jira")
 async def ingest_jira_project(
     request: JiraIngestionRequest,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Ingest issues from a JIRA project."""
     try:
         # Verify workspace exists and user has access
-        workspace = db.query(Workspace).filter(Workspace.id == request.workspace_id).first()
-        if not workspace:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Workspace not found"
-            )
+        workspace = check_workspace_access(request.workspace_id, current_user, db)
         
         # Create data source record
         config = {
@@ -460,18 +472,13 @@ async def ingest_document(
     workspace_id: int = Form(...),
     name: str = Form(...),
     file: UploadFile = File(...),
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Ingest a document file."""
     try:
         # Verify workspace exists and user has access
-        workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
-        if not workspace:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Workspace not found"
-            )
+        workspace = check_workspace_access(workspace_id, current_user, db)
         
         # Check file size
         if file.size > settings.MAX_FILE_SIZE:
@@ -536,7 +543,7 @@ async def ingest_document(
 @router.get("/status/{data_source_id}")
 async def get_ingestion_status(
     data_source_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Get ingestion status for a data source."""
@@ -547,7 +554,8 @@ async def get_ingestion_status(
             detail="Data source not found"
         )
     
-    # TODO: Check user access to workspace
+    # Check user access to workspace
+    check_workspace_access(data_source.workspace_id, current_user, db)
     
     return {
         "id": data_source.id,
@@ -561,7 +569,7 @@ async def get_ingestion_status(
 @router.delete("/sources/{data_source_id}")
 async def delete_data_source(
     data_source_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Delete a data source and its associated documents."""
@@ -572,7 +580,8 @@ async def delete_data_source(
             detail="Data source not found"
         )
     
-    # TODO: Check user access to workspace
+    # Check user access to workspace
+    check_workspace_access(data_source.workspace_id, current_user, db)
     # TODO: Delete associated documents and vector embeddings
     
     db.delete(data_source)
@@ -584,7 +593,7 @@ async def delete_data_source(
 @router.get("/documents/{document_id}")
 async def get_document(
     document_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Get a document with its content for viewing."""
@@ -616,7 +625,7 @@ async def get_document(
 async def get_document_chunk(
     document_id: int,
     chunk_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Get a specific chunk with its location in the document."""
@@ -655,10 +664,12 @@ async def get_document_chunk(
 @router.get("/documents/by-workspace/{workspace_id}")
 async def get_workspace_documents(
     workspace_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Get all documents for a workspace."""
+    check_workspace_access(workspace_id, current_user, db)
+    
     # Get all data sources for the workspace
     data_sources = db.query(DataSource).filter(DataSource.workspace_id == workspace_id).all()
     data_source_ids = [ds.id for ds in data_sources]
@@ -686,7 +697,7 @@ async def ingest_code_files(
     workspace_id: int = Form(...),
     name: str = Form(...),
     files: List[UploadFile] = File(...),
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -698,13 +709,8 @@ async def ingest_code_files(
     Supported extensions: .c, .h, .cpp, .cc, .cxx, .hpp, .hxx, .hh
     """
     try:
-        # Verify workspace exists
-        workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
-        if not workspace:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Workspace not found"
-            )
+        # Verify workspace exists and user has access
+        workspace = check_workspace_access(workspace_id, current_user, db)
         
         # Filter supported files
         supported_extensions = {'.c', '.h', '.cpp', '.cc', '.cxx', '.hpp', '.hxx', '.hh'}
@@ -774,7 +780,7 @@ async def ingest_code_files(
 @router.post("/code/directory")
 async def ingest_code_directory(
     request: CodeIngestionRequest,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -784,13 +790,8 @@ async def ingest_code_directory(
     with AST-based parsing and LLM summary generation.
     """
     try:
-        # Verify workspace exists
-        workspace = db.query(Workspace).filter(Workspace.id == request.workspace_id).first()
-        if not workspace:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Workspace not found"
-            )
+        # Verify workspace exists and user has access
+        workspace = check_workspace_access(request.workspace_id, current_user, db)
         
         # Verify directory exists
         if not request.directory_path or not os.path.isdir(request.directory_path):
@@ -854,7 +855,7 @@ async def ingest_code_directory(
 @router.get("/code/units/{document_id}")
 async def get_code_units(
     document_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Get all code units for a document."""
@@ -879,7 +880,7 @@ async def get_code_units(
 @router.get("/code/units/{unit_id}/detail")
 async def get_code_unit_detail(
     unit_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Get detailed information about a code unit including code and call graph."""
@@ -916,10 +917,12 @@ async def get_code_unit_detail(
 @router.get("/code/call-graph/{workspace_id}")
 async def get_workspace_call_graph(
     workspace_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Get the call graph for all code in a workspace."""
+    check_workspace_access(workspace_id, current_user, db)
+    
     # Get all documents in workspace
     data_sources = db.query(DataSource).filter(
         DataSource.workspace_id == workspace_id,

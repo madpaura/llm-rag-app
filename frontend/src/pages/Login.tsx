@@ -48,10 +48,10 @@ export function Login() {
             <LogIn className="h-6 w-6 text-primary-600" />
           </div>
           <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
-            Sign in to RAG Assistant
+            RAG Assistant
           </h2>
           <p className="mt-2 text-center text-sm text-gray-600">
-            Access your organization's knowledge base
+            Build your custom knowledge base for RAG
           </p>
         </div>
         
@@ -122,11 +122,6 @@ export function Login() {
             </button>
           </div>
 
-          <div className="text-center">
-            <p className="text-sm text-gray-600">
-              Demo credentials: admin@example.com / password
-            </p>
-          </div>
         </form>
       </div>
     </div>

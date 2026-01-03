@@ -2,19 +2,44 @@
 Query and chat endpoints for RAG functionality.
 """
 from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import structlog
 import json
 
-from core.database import get_db, ChatSession, ChatMessage, Workspace
+from core.database import get_db, ChatSession, ChatMessage, Workspace, User, WorkspaceMember
 from services.query_service import RAGQueryService, ChatService
+from api.routes.auth import get_current_user
 
 logger = structlog.get_logger()
 router = APIRouter()
-security = HTTPBearer()
+
+
+def check_workspace_access(workspace_id: int, user: User, db: Session) -> Workspace:
+    """Check if user has access to workspace."""
+    workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+    if not workspace:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workspace not found"
+        )
+    
+    if user.is_admin:
+        return workspace
+    
+    member = db.query(WorkspaceMember)\
+        .filter(WorkspaceMember.workspace_id == workspace_id)\
+        .filter(WorkspaceMember.user_id == user.id)\
+        .first()
+    
+    if not member:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this workspace"
+        )
+    
+    return workspace
 
 class QueryRequest(BaseModel):
     question: str
@@ -42,18 +67,13 @@ class ChatSessionCreate(BaseModel):
 @router.post("/search", response_model=QueryResponse)
 async def search_knowledge_base(
     request: QueryRequest,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Search the knowledge base with a question."""
     try:
-        # TODO: Verify user access to workspace
-        workspace = db.query(Workspace).filter(Workspace.id == request.workspace_id).first()
-        if not workspace:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Workspace not found"
-            )
+        # Verify user access to workspace
+        workspace = check_workspace_access(request.workspace_id, current_user, db)
         
         # Process RAG query
         rag_service = RAGQueryService()
@@ -91,21 +111,15 @@ async def search_knowledge_base(
 @router.post("/chat/sessions")
 async def create_chat_session(
     request: ChatSessionCreate,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Create a new chat session."""
     try:
-        # TODO: Get user from token
-        user_id = 1  # Mock user ID
+        user_id = current_user.id
         
         # Verify workspace exists and user has access
-        workspace = db.query(Workspace).filter(Workspace.id == request.workspace_id).first()
-        if not workspace:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Workspace not found"
-            )
+        workspace = check_workspace_access(request.workspace_id, current_user, db)
         
         # Create chat session
         session = ChatSession(
@@ -135,13 +149,15 @@ async def create_chat_session(
 @router.get("/chat/sessions/{workspace_id}")
 async def get_chat_sessions(
     workspace_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Get chat sessions for a workspace."""
     try:
-        # TODO: Get user from token and verify access
-        user_id = 1  # Mock user ID
+        user_id = current_user.id
+        
+        # Verify workspace access
+        check_workspace_access(workspace_id, current_user, db)
         
         sessions = db.query(ChatSession)\
             .filter(ChatSession.workspace_id == workspace_id)\
@@ -171,13 +187,12 @@ async def get_chat_sessions(
 @router.post("/chat/message")
 async def send_chat_message(
     request: ChatMessageRequest,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Send a message in a chat session."""
     try:
-        # TODO: Get user from token
-        user_id = 1  # Mock user ID
+        user_id = current_user.id
         
         # Get chat session and verify access
         session = db.query(ChatSession).filter(ChatSession.id == request.session_id).first()
@@ -187,7 +202,8 @@ async def send_chat_message(
                 detail="Chat session not found"
             )
         
-        if session.user_id != user_id:
+        # Allow access if user owns session or is admin
+        if session.user_id != user_id and not current_user.is_admin:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to chat session"
@@ -231,13 +247,12 @@ async def send_chat_message(
 async def get_chat_history(
     session_id: int,
     limit: Optional[int] = 50,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Get chat history for a session."""
     try:
-        # TODO: Get user from token and verify access
-        user_id = 1  # Mock user ID
+        user_id = current_user.id
         
         session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
         if not session:
@@ -246,7 +261,7 @@ async def get_chat_history(
                 detail="Chat session not found"
             )
         
-        if session.user_id != user_id:
+        if session.user_id != user_id and not current_user.is_admin:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to chat session"
@@ -273,13 +288,12 @@ async def get_chat_history(
 @router.delete("/chat/sessions/{session_id}")
 async def delete_chat_session(
     session_id: int,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Delete a chat session and all its messages."""
     try:
-        # TODO: Get user from token and verify access
-        user_id = 1  # Mock user ID
+        user_id = current_user.id
         
         session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
         if not session:
@@ -288,7 +302,7 @@ async def delete_chat_session(
                 detail="Chat session not found"
             )
         
-        if session.user_id != user_id:
+        if session.user_id != user_id and not current_user.is_admin:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to chat session"

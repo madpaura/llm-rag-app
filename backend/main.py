@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 
 from api.routes import auth, workspaces, ingestion, query, health, rag, admin, embeddings
 from core.config import get_settings
-from core.database import init_db
+from core.database import init_db, check_db_connectivity, ensure_admin_user
 from core.logging import setup_logging
 from core.cache import cleanup_caches
 
@@ -29,9 +29,28 @@ async def lifespan(app: FastAPI):
     
     logger.info("Starting RAG application...")
     
-    # Initialize database (fast - just creates tables if needed)
+    # Step 1: Check database connectivity
+    logger.info("Checking database connectivity...")
+    db_status = check_db_connectivity()
+    if not db_status["connected"]:
+        logger.error(f"Database connection failed: {db_status['error']}")
+        logger.error("Please check your DATABASE_URL in .env file")
+        # Continue anyway - tables creation might fix it
+    else:
+        logger.info("Database connection successful")
+    
+    # Step 2: Initialize database tables
     await init_db()
-    logger.info("Database initialized")
+    logger.info("Database tables initialized")
+    
+    # Step 3: Ensure admin user exists
+    admin_result = ensure_admin_user()
+    if admin_result.get("created"):
+        logger.info(f"Created default admin user: {admin_result['username']}")
+    elif admin_result.get("error"):
+        logger.warning(f"Could not ensure admin user: {admin_result['error']}")
+    else:
+        logger.info(f"Admin user exists: {admin_result.get('username', 'unknown')}")
     
     # Note: Heavy services (vector store, embeddings) are lazy-loaded
     # They will be initialized on first use, not at startup
